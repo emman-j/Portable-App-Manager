@@ -24,3 +24,9 @@ Leave it empty to auto-pick the best file for your OS/CPU.
 Launch · Update/Install · Check · Reinstall · Install from downloaded file · Open folder · Edit · Remove.
 Updates extract over the existing folder, so portable settings stored inside it survive.
 Supported archives: `.zip`, `.tar.gz`/`.tgz`; any other file (exe, AppImage) is copied as-is.
+
+## Moving to another PC
+Top bar → **⇅ Backup** → *Export app list…* writes a small JSON (sources, package names, args – no files, no token).
+On the other PC → *Import app list…*, then **⬇ Install / update all**. Duplicates are skipped.
+Manual apps show a **Pick file** button (they have no download source); linked external programs keep their absolute path.
+Alternatively just copy the whole `pam-data/` folder to carry installed files too.

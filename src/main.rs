@@ -544,6 +544,83 @@ impl Manager {
         Ok(())
     }
 
+    // ---- export / import (app list only, no downloaded files, no token)
+
+    fn export_apps(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export app list")
+            .set_file_name("portable-apps.json")
+            .add_filter("JSON", &["json"])
+            .save_file()
+        else {
+            return;
+        };
+        let apps: Vec<AppEntry> = self
+            .cfg
+            .apps
+            .iter()
+            .cloned()
+            .map(|mut a| {
+                if a.managed {
+                    a.version = None; // will be (re)installed on the other PC
+                }
+                a
+            })
+            .collect();
+        let n = apps.len();
+        let doc = serde_json::json!({ "format": "portable-app-manager-export", "version": 1, "apps": apps });
+        let res = serde_json::to_string_pretty(&doc)
+            .map_err(|e| e.to_string())
+            .and_then(|s| fs::write(&path, s).map_err(|e| e.to_string()));
+        match res {
+            Ok(()) => self.say(format!("Exported {n} apps to {}", path.display())),
+            Err(e) => self.say(format!("Export failed: {e}")),
+        }
+    }
+
+    fn import_apps(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Import app list")
+            .add_filter("JSON", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let res: Result<(usize, usize), String> = (|| {
+            let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Not valid JSON: {e}"))?;
+            let list = v.get("apps").cloned().ok_or("This file has no \"apps\" list")?;
+            let apps: Vec<AppEntry> = serde_json::from_value(list).map_err(|e| format!("Unreadable app list: {e}"))?;
+            let (mut added, mut skipped) = (0, 0);
+            for mut a in apps {
+                let dup = self
+                    .cfg
+                    .apps
+                    .iter()
+                    .any(|x| x.id == a.id || (x.name.eq_ignore_ascii_case(&a.name) && x.source == a.source));
+                if dup {
+                    skipped += 1;
+                    continue;
+                }
+                if a.managed {
+                    a.version = None;
+                }
+                self.cfg.apps.push(a);
+                added += 1;
+            }
+            Ok((added, skipped))
+        })();
+        match res {
+            Ok((added, skipped)) => {
+                self.save();
+                self.say(format!(
+                    "Imported {added} app(s), skipped {skipped} already present. Use “Install all” to download them."
+                ));
+            }
+            Err(e) => self.say(format!("Import failed: {e}")),
+        }
+    }
+
     // ---- UI pieces
 
     fn card(&self, ui: &mut egui::Ui, e: &AppEntry, acts: &mut Vec<(String, Act)>) {
@@ -586,10 +663,11 @@ impl Manager {
                         }
                     });
                     if has_update || (!installed && e.managed) {
-                        let label = if installed { "⬆ Update" } else { "⬇ Install" };
+                        let manual = matches!(e.source, Source::Manual);
+                        let label = if installed { "⬆ Update" } else if manual { "📂 Pick file" } else { "⬇ Install" };
                         let b = egui::Button::new(RichText::new(label).strong()).fill(Color32::from_rgb(30, 100, 60));
                         if ui.add_enabled(busy.is_none(), b).clicked() {
-                            acts.push((id.clone(), Act::Update));
+                            acts.push((id.clone(), if manual { Act::Import } else { Act::Update }));
                         }
                     }
                     let can_launch = busy.is_none() && e.exe.is_some();
@@ -848,7 +926,7 @@ impl eframe::App for Manager {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
 
-        let (mut add, mut check_all, mut update_all) = (false, false, false);
+        let (mut add, mut check_all, mut update_all, mut export, mut import) = (false, false, false, false, false);
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -856,7 +934,17 @@ impl eframe::App for Manager {
                 ui.separator();
                 add = ui.button("➕ Add app").clicked();
                 check_all = ui.button("🔄 Check all").clicked();
-                update_all = ui.button("⬆ Update all").clicked();
+                update_all = ui.button("⬇ Install / update all").clicked();
+                ui.menu_button("⇅ Backup", |ui| {
+                    if ui.button("Export app list…").clicked() {
+                        export = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Import app list…").clicked() {
+                        import = true;
+                        ui.close_menu();
+                    }
+                });
                 if ui.button("⚙").on_hover_text("Settings").clicked() {
                     self.show_settings = !self.show_settings;
                 }
@@ -902,6 +990,12 @@ impl eframe::App for Manager {
         if add {
             self.form = Some(Form::new());
         }
+        if export {
+            self.export_apps();
+        }
+        if import {
+            self.import_apps();
+        }
         if check_all {
             self.check_all(ctx);
         }
@@ -910,7 +1004,10 @@ impl eframe::App for Manager {
                 .cfg
                 .apps
                 .iter()
-                .filter(|a| self.update_available(a))
+                .filter(|a| {
+                    self.update_available(a)
+                        || (a.managed && a.version.is_none() && a.source.can_check() && !self.busy.contains_key(&a.id))
+                })
                 .map(|a| a.id.clone())
                 .collect();
             for id in ids {
