@@ -504,7 +504,7 @@ impl Manager {
             Act::Reinstall => self.start_install(ctx, &id, InstallSrc::Remote(None)),
             Act::Check => self.start_check(ctx, &id),
             Act::Import => {
-                if let Some(f) = rfd::FileDialog::new().set_title("Pick the downloaded file (zip / tar.gz / exe / AppImage)").pick_file() {
+                if let Some(f) = rfd::FileDialog::new().set_title("Pick the downloaded file (zip / 7z / tar.gz / exe / AppImage)").pick_file() {
                     self.start_install(ctx, &id, InstallSrc::File(f));
                 }
             }
@@ -522,8 +522,8 @@ impl Manager {
             }
             Act::Group => self.tile_path = id,
             Act::Remove => {
-                let managed = self.entry(&id).map(|e| e.managed).unwrap_or(true);
-                self.remove = Some((id, managed));
+                // file deletion is opt-in every time: the box starts unchecked
+                self.remove = Some((id, false));
             }
         }
     }
@@ -1102,7 +1102,7 @@ impl Manager {
                             if f.editing.is_none() {
                                 ui.label("Mode");
                                 ui.vertical(|ui| {
-                                    ui.radio_value(&mut f.manual_mode, ManualMode::Import, "Import a file I downloaded (zip / tar.gz / exe)");
+                                    ui.radio_value(&mut f.manual_mode, ManualMode::Import, "Import a file I downloaded (zip / 7z / tar.gz / exe)");
                                     ui.radio_value(&mut f.manual_mode, ManualMode::Link, "Link an existing program (stays where it is)");
                                 });
                                 ui.end_row();
@@ -1192,11 +1192,20 @@ impl Manager {
                 ui.label(format!("Remove “{}” from the manager?", e.name));
                 if e.managed {
                     ui.checkbox(&mut delete, "Also delete its files");
+                    if delete {
+                        ui.colored_label(
+                            Color32::LIGHT_RED,
+                            format!("⚠ This permanently deletes everything in:\n{}", e.dir(&self.paths).display()),
+                        );
+                    } else {
+                        ui.label(RichText::new("Files stay on disk.").weak());
+                    }
                 } else {
                     ui.label(RichText::new("It is a linked program – its files are never deleted.").weak());
                 }
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new("Remove").color(Color32::LIGHT_RED)).clicked() {
+                    let label = if e.managed && delete { "Remove and delete files" } else { "Remove" };
+                    if ui.button(RichText::new(label).color(Color32::LIGHT_RED)).clicked() {
                         yes = true;
                     }
                     if ui.button("Cancel").clicked() {

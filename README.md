@@ -22,8 +22,9 @@ Leave it empty to auto-pick the best file for your OS/CPU.
 
 ## Per app
 Launch · Update/Install · Check · Reinstall · Install from downloaded file · Open folder · Edit · Remove.
+Remove always shows a confirmation dialog; deleting the app's files is opt-in each time (checkbox starts unchecked, with a warning showing the folder).
 Updates extract over the existing folder, so portable settings stored inside it survive.
-Supported archives: `.zip`, `.tar.gz`/`.tgz`; any other file (exe, AppImage) is copied as-is.
+Supported archives: `.zip`, `.7z`, `.tar.gz`/`.tgz`; any other file (exe, AppImage) is copied as-is.
 
 ## Moving to another PC
 Top bar → **⇅ Backup** → *Export app list…* writes a small JSON (sources, package names, args – no files, no token).

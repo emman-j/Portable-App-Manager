@@ -13,6 +13,7 @@ url = "2"
 percent-encoding = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
+sevenz-rust = "0.6"
 tar = "0.4"
 rfd = "0.15"
 open = "5"

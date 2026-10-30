@@ -15,6 +15,8 @@ pub fn install_file(file: &Path, filename: &str, dest: &Path) -> Result<(), Stri
         extract_zip(file, dest)
     } else if l.ends_with(".tar.gz") || l.ends_with(".tgz") {
         extract_targz(file, dest)
+    } else if l.ends_with(".7z") {
+        extract_7z(file, dest)
     } else {
         // single file (exe, AppImage, ...) -> copy as-is
         let target = dest.join(util::sanitize(filename));
@@ -123,6 +125,49 @@ fn extract_targz(file: &Path, dest: &Path) -> Result<(), String> {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
             e.unpack(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Extract a .7z into a scratch folder inside `dest`, strip a single common
+/// top-level folder (like zip/tar.gz do), then merge the result into `dest`.
+fn extract_7z(file: &Path, dest: &Path) -> Result<(), String> {
+    let scratch = dest.join(".pam-7z-extract");
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+
+    let result = (|| -> Result<(), String> {
+        sevenz_rust::decompress_file(file, &scratch).map_err(|e| format!("7z extract failed: {e}"))?;
+
+        let entries: Vec<PathBuf> = fs::read_dir(&scratch)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        let src = if entries.len() == 1 && entries[0].is_dir() { entries[0].clone() } else { scratch.clone() };
+        merge_move(&src, dest)
+    })();
+
+    let _ = fs::remove_dir_all(&scratch);
+    result
+}
+
+/// Move everything in `from` into `to`, merging folders and overwriting files.
+fn merge_move(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    for e in fs::read_dir(from).map_err(|e| e.to_string())?.flatten() {
+        let src = e.path();
+        let dst = to.join(e.file_name());
+        if src.is_dir() {
+            merge_move(&src, &dst)?;
+        } else {
+            if dst.exists() {
+                fs::remove_file(&dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+            }
+            if fs::rename(&src, &dst).is_err() {
+                fs::copy(&src, &dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+            }
         }
     }
     Ok(())
