@@ -163,3 +163,12 @@ pub fn strip_ext(name: &str) -> String {
     }
     name.to_string()
 }
+
+/// "Games \ Emulators/" -> "Games/Emulators"
+pub fn norm_group(s: &str) -> String {
+    s.split(|c: char| c == '/' || c == '\\')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}

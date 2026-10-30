@@ -72,6 +72,9 @@ pub struct AppEntry {
     /// false = a linked external program: we never delete its files.
     #[serde(default = "yes")]
     pub managed: bool,
+    /// Folder path, "/" separated for nesting, e.g. "Games/Emulators". Empty = top level.
+    #[serde(default)]
+    pub group: String,
 }
 
 impl AppEntry {
@@ -85,7 +88,18 @@ impl AppEntry {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+pub enum ViewMode {
+    #[default]
+    List,
+    Tiles,
+}
+
+fn default_tile() -> f32 {
+    128.0
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub apps: Vec<AppEntry>,
@@ -93,6 +107,16 @@ pub struct Config {
     pub github_token: String,
     #[serde(default = "yes")]
     pub auto_check: bool,
+    #[serde(default)]
+    pub view: ViewMode,
+    #[serde(default = "default_tile")]
+    pub tile_size: f32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config { apps: vec![], github_token: String::new(), auto_check: true, view: ViewMode::List, tile_size: default_tile() }
+    }
 }
 
 #[derive(Clone)]

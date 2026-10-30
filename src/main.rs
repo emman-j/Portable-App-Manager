@@ -1,14 +1,15 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
+mod icons;
 mod install;
 mod model;
 mod net;
 mod util;
 
 use eframe::egui::{self, Color32, RichText};
-use model::{AppEntry, Config, Paths, Source};
+use model::{AppEntry, Config, Paths, Source, ViewMode};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     path::PathBuf,
     sync::mpsc::{channel, Receiver, Sender},
@@ -28,6 +29,12 @@ enum Msg {
     Progress { id: String, text: String, frac: Option<f32> },
     Checked { id: String, res: Result<net::Remote, String> },
     Installed { id: String, res: Result<Installed, String> },
+    Icon { id: String, key: String, img: Option<egui::ColorImage> },
+}
+
+struct IconSlot {
+    key: String,
+    tex: Option<egui::TextureHandle>,
 }
 
 enum InstallSrc {
@@ -172,6 +179,7 @@ struct Form {
     exe: String,
     exes: Vec<String>,
     args: String,
+    group: String,
     error: String,
 }
 
@@ -194,6 +202,7 @@ impl Form {
             exe: String::new(),
             exes: vec![],
             args: String::new(),
+            group: String::new(),
             error: String::new(),
         }
     }
@@ -204,6 +213,7 @@ impl Form {
         f.name = e.name.clone();
         f.locked = true;
         f.args = e.args.clone();
+        f.group = e.group.clone();
         f.exe = e.exe.clone().unwrap_or_default();
         f.exes = install::find_executables(&e.dir(paths));
         match &e.source {
@@ -293,6 +303,8 @@ enum Act {
     OpenDir,
     Edit,
     Remove,
+    /// open a folder in tile view (the id slot carries the group path)
+    Group,
 }
 
 struct Manager {
@@ -308,6 +320,22 @@ struct Manager {
     remove: Option<(String, bool)>,
     show_settings: bool,
     toast: Option<(String, Instant)>,
+    tile_path: String,
+    icons: HashMap<String, IconSlot>,
+    icon_pending: HashSet<String>,
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let max = max.max(4);
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max - 1).collect::<String>())
+    }
+}
+
+fn join_group(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") }
 }
 
 impl Manager {
@@ -328,6 +356,9 @@ impl Manager {
             remove: None,
             show_settings: false,
             toast: None,
+            tile_path: String::new(),
+            icons: HashMap::new(),
+            icon_pending: HashSet::new(),
         };
         if m.cfg.auto_check {
             m.check_all(&cc.egui_ctx);
@@ -399,7 +430,7 @@ impl Manager {
         });
     }
 
-    fn poll(&mut self) {
+    fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Progress { id, text, frac } => {
@@ -418,6 +449,11 @@ impl Manager {
                             self.errors.insert(id, e);
                         }
                     }
+                }
+                Msg::Icon { id, key, img } => {
+                    self.icon_pending.remove(&id);
+                    let tex = img.map(|i| ctx.load_texture(format!("icon-{id}"), i, egui::TextureOptions::LINEAR));
+                    self.icons.insert(id, IconSlot { key, tex });
                 }
                 Msg::Installed { id, res } => {
                     self.busy.remove(&id);
@@ -484,6 +520,7 @@ impl Manager {
                     self.form = Some(Form::from_entry(e, &self.paths));
                 }
             }
+            Act::Group => self.tile_path = id,
             Act::Remove => {
                 let managed = self.entry(&id).map(|e| e.managed).unwrap_or(true);
                 self.remove = Some((id, managed));
@@ -503,6 +540,7 @@ impl Manager {
                 e.name = name.into();
                 e.source = source;
                 e.args = f.args.trim().into();
+                e.group = util::norm_group(&f.group);
                 e.exe = (!f.exe.trim().is_empty()).then(|| f.exe.trim().to_string());
             }
             self.latest.remove(id);
@@ -520,6 +558,7 @@ impl Manager {
             exe: None,
             args: f.args.trim().into(),
             managed: true,
+            group: util::norm_group(&f.group),
         };
 
         let mut to_install: Option<InstallSrc> = None;
@@ -605,6 +644,7 @@ impl Manager {
                 if a.managed {
                     a.version = None;
                 }
+                a.group = util::norm_group(&a.group);
                 self.cfg.apps.push(a);
                 added += 1;
             }
@@ -623,6 +663,294 @@ impl Manager {
 
     // ---- UI pieces
 
+    // ---- groups
+
+    fn all_groups(&self) -> Vec<String> {
+        let mut set = BTreeSet::new();
+        for a in &self.cfg.apps {
+            let mut acc = String::new();
+            for part in a.group.split('/').filter(|p| !p.is_empty()) {
+                if !acc.is_empty() {
+                    acc.push('/');
+                }
+                acc.push_str(part);
+                set.insert(acc.clone());
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// Names of the direct sub-folders of `prefix`.
+    fn child_groups(&self, prefix: &str) -> Vec<String> {
+        let mut set = BTreeSet::new();
+        for a in &self.cfg.apps {
+            let g = a.group.as_str();
+            let rest = if prefix.is_empty() {
+                g
+            } else if let Some(r) = g.strip_prefix(prefix).and_then(|r| r.strip_prefix('/')) {
+                r
+            } else {
+                continue;
+            };
+            if let Some(first) = rest.split('/').next().filter(|f| !f.is_empty()) {
+                set.insert(first.to_string());
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    fn in_group<'a>(&'a self, full: &'a str) -> impl Iterator<Item = &'a AppEntry> + 'a {
+        let pre = format!("{full}/");
+        self.cfg.apps.iter().filter(move |a| a.group == full || a.group.starts_with(&pre))
+    }
+
+    // ---- icons
+
+    fn ensure_icons(&mut self, ctx: &egui::Context) {
+        for a in &self.cfg.apps {
+            let exe = a.exe_path(&self.paths);
+            let key = format!(
+                "{}|{}",
+                exe.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+                a.version.clone().unwrap_or_default()
+            );
+            let fresh = self.icons.get(&a.id).map(|s| s.key == key).unwrap_or(false);
+            if fresh || self.icon_pending.contains(&a.id) {
+                continue;
+            }
+            let Some(exe) = exe else {
+                self.icons.insert(a.id.clone(), IconSlot { key, tex: None });
+                continue;
+            };
+            self.icon_pending.insert(a.id.clone());
+            let (tx, ctx, id, dir) = (self.tx.clone(), ctx.clone(), a.id.clone(), a.dir(&self.paths));
+            thread::spawn(move || {
+                let img = icons::load(&exe, &dir);
+                let _ = tx.send(Msg::Icon { id, key, img });
+                ctx.request_repaint();
+            });
+        }
+    }
+
+    /// Real icon if we have one, otherwise a coloured tile with the first letter.
+    fn paint_icon(&self, p: &egui::Painter, rect: egui::Rect, e: &AppEntry) {
+        if let Some(t) = self.icons.get(&e.id).and_then(|s| s.tex.as_ref()) {
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            p.image(t.id(), rect, uv, Color32::WHITE);
+        } else {
+            let h = e.name.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+            let c = Color32::from_rgb(
+                50 + (h & 0x5f) as u8,
+                50 + ((h >> 8) & 0x5f) as u8,
+                70 + ((h >> 16) & 0x5f) as u8,
+            );
+            p.rect_filled(rect, rect.width() * 0.2, c);
+            let letter = e.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into());
+            p.text(rect.center(), egui::Align2::CENTER_CENTER, letter, egui::FontId::proportional(rect.height() * 0.5), Color32::WHITE);
+        }
+    }
+
+    fn icon(&self, ui: &mut egui::Ui, e: &AppEntry, size: f32) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+        self.paint_icon(ui.painter(), rect, e);
+    }
+
+    // ---- shared per-app menu (⋮ in list view, right-click in tile view)
+
+    fn menu_items(&self, ui: &mut egui::Ui, e: &AppEntry, acts: &mut Vec<(String, Act)>, extra: bool) {
+        let id = e.id.clone();
+        let busy = self.busy.contains_key(&id);
+        let manual = matches!(e.source, Source::Manual);
+        let mut push = |ui: &mut egui::Ui, a: Act| {
+            acts.push((id.clone(), a));
+            ui.close_menu();
+        };
+        if extra {
+            if ui.add_enabled(!busy && e.exe.is_some(), egui::Button::new("▶ Launch")).clicked() {
+                push(ui, Act::Launch);
+            }
+            let need = self.update_available(e) || (e.version.is_none() && e.managed);
+            if need && ui.add_enabled(!busy, egui::Button::new(if e.version.is_some() { "⬆ Update" } else { "⬇ Install" })).clicked() {
+                push(ui, if manual { Act::Import } else { Act::Update });
+            }
+            ui.separator();
+        }
+        if e.source.can_check() && ui.button("Check for update").clicked() {
+            push(ui, Act::Check);
+        }
+        if e.managed && e.source.can_check() && ui.button("Reinstall latest").clicked() {
+            push(ui, Act::Reinstall);
+        }
+        if e.managed && ui.button("Install from downloaded file…").clicked() {
+            push(ui, Act::Import);
+        }
+        if e.managed && ui.button("Open folder").clicked() {
+            push(ui, Act::OpenDir);
+        }
+        if ui.button("Edit… (name, group, exe)").clicked() {
+            push(ui, Act::Edit);
+        }
+        ui.separator();
+        if ui.button(RichText::new("Remove…").color(Color32::LIGHT_RED)).clicked() {
+            push(ui, Act::Remove);
+        }
+    }
+
+    // ---- list view (nested tree)
+
+    fn list_level(&self, ui: &mut egui::Ui, prefix: &str, acts: &mut Vec<(String, Act)>) {
+        for name in self.child_groups(prefix) {
+            let full = join_group(prefix, &name);
+            let n = self.in_group(&full).count();
+            egui::CollapsingHeader::new(RichText::new(format!("📁 {name}  ({n})")).strong())
+                .id_salt(("grp", full.clone()))
+                .default_open(true)
+                .show(ui, |ui| self.list_level(ui, &full, acts));
+        }
+        let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| a.group == prefix).collect();
+        apps.sort_by_key(|a| a.name.to_lowercase());
+        for e in apps {
+            self.card(ui, e, acts);
+        }
+    }
+
+    // ---- tile view (folders open like a Start-menu folder, with breadcrumbs)
+
+    fn tiles_level(&self, ui: &mut egui::Ui, ts: f32, acts: &mut Vec<(String, Act)>) {
+        if !self.tile_path.is_empty() {
+            ui.horizontal(|ui| {
+                if ui.link("🏠 Home").clicked() {
+                    acts.push((String::new(), Act::Group));
+                }
+                let mut acc = String::new();
+                for part in self.tile_path.split('/').filter(|p| !p.is_empty()) {
+                    if !acc.is_empty() {
+                        acc.push('/');
+                    }
+                    acc.push_str(part);
+                    ui.label("›");
+                    if ui.link(part).clicked() {
+                        acts.push((acc.clone(), Act::Group));
+                    }
+                }
+            });
+            ui.add_space(6.0);
+        }
+        let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| a.group == self.tile_path).collect();
+        apps.sort_by_key(|a| a.name.to_lowercase());
+        let folders = self.child_groups(&self.tile_path);
+        if apps.is_empty() && folders.is_empty() {
+            ui.label(RichText::new("This folder is empty.").weak());
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+            for name in &folders {
+                self.folder_tile(ui, &join_group(&self.tile_path, name), name, ts, acts);
+            }
+            for e in apps {
+                self.tile(ui, e, ts, acts);
+            }
+        });
+    }
+
+    fn folder_tile(&self, ui: &mut egui::Ui, full: &str, name: &str, ts: f32, acts: &mut Vec<(String, Act)>) {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ts, ts * 1.2), egui::Sense::click());
+        let vis = ui.visuals();
+        let fill = if resp.hovered() { vis.widgets.hovered.bg_fill } else { vis.widgets.inactive.weak_bg_fill };
+        let stroke = vis.widgets.noninteractive.bg_stroke;
+        let (txt, weak) = (vis.text_color(), vis.weak_text_color());
+        let p = ui.painter();
+        p.rect_filled(rect, 8.0, fill);
+        p.rect_stroke(rect, 8.0, stroke);
+
+        let members: Vec<&AppEntry> = self.in_group(full).collect();
+        let area = ts * 0.56;
+        let origin = egui::pos2(rect.center().x - area / 2.0, rect.top() + ts * 0.1);
+        p.rect_filled(egui::Rect::from_min_size(origin - egui::vec2(5.0, 5.0), egui::vec2(area + 10.0, area + 10.0)), 8.0, Color32::from_white_alpha(18));
+        let cell = area / 2.0;
+        for (i, a) in members.iter().take(4).enumerate() {
+            let (cx, cy) = ((i % 2) as f32, (i / 2) as f32);
+            let r = egui::Rect::from_min_size(egui::pos2(origin.x + cx * cell, origin.y + cy * cell), egui::vec2(cell - 4.0, cell - 4.0));
+            self.paint_icon(p, r, a);
+        }
+        let y = rect.top() + ts * 0.1 + area + 14.0;
+        let max = ((ts - 10.0) / 7.0) as usize;
+        p.text(egui::pos2(rect.center().x, y), egui::Align2::CENTER_TOP, truncate(name, max), egui::FontId::proportional(13.0), txt);
+        p.text(egui::pos2(rect.center().x, y + 17.0), egui::Align2::CENTER_TOP, format!("{} apps", members.len()), egui::FontId::proportional(11.0), weak);
+        if resp.clicked() {
+            acts.push((full.to_string(), Act::Group));
+        }
+    }
+
+    fn tile(&self, ui: &mut egui::Ui, e: &AppEntry, ts: f32, acts: &mut Vec<(String, Act)>) {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ts, ts * 1.2), egui::Sense::click());
+        let busy = self.busy.get(&e.id);
+        let has_update = self.update_available(e);
+        let installed = e.version.is_some();
+        let err = self.errors.get(&e.id);
+        let vis = ui.visuals();
+        let fill = if resp.hovered() { vis.widgets.hovered.bg_fill } else { vis.widgets.inactive.weak_bg_fill };
+        let stroke = if resp.hovered() { vis.widgets.hovered.bg_stroke } else { vis.widgets.noninteractive.bg_stroke };
+        let (txt, weak) = (vis.text_color(), vis.weak_text_color());
+
+        let p = ui.painter();
+        p.rect_filled(rect, 8.0, fill);
+        p.rect_stroke(rect, 8.0, stroke);
+
+        let isz = ts * 0.5;
+        let irect = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + ts * 0.12 + isz / 2.0), egui::vec2(isz, isz));
+        self.paint_icon(p, irect, e);
+
+        let max = ((ts - 10.0) / 7.0) as usize;
+        let y = irect.bottom() + 8.0;
+        p.text(egui::pos2(rect.center().x, y), egui::Align2::CENTER_TOP, truncate(&e.name, max), egui::FontId::proportional(13.0), txt);
+        let status = match (busy, &e.version) {
+            (Some((t, _)), _) => t.clone(),
+            (None, Some(v)) => v.clone(),
+            (None, None) => "Not installed".into(),
+        };
+        p.text(egui::pos2(rect.center().x, y + 17.0), egui::Align2::CENTER_TOP, truncate(&status, max), egui::FontId::proportional(11.0), weak);
+
+        if has_update {
+            p.circle_filled(rect.right_top() + egui::vec2(-12.0, 12.0), 5.0, Color32::LIGHT_GREEN);
+        } else if !installed && e.managed {
+            p.circle_filled(rect.right_top() + egui::vec2(-12.0, 12.0), 5.0, Color32::YELLOW);
+        }
+        if err.is_some() {
+            p.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, "⚠", egui::FontId::proportional(13.0), Color32::LIGHT_RED);
+        }
+        if let Some((_, frac)) = busy {
+            let bar = egui::Rect::from_min_size(egui::pos2(rect.left() + 8.0, rect.bottom() - 10.0), egui::vec2(rect.width() - 16.0, 4.0));
+            p.rect_filled(bar, 2.0, Color32::from_white_alpha(30));
+            let f = frac.unwrap_or(0.15).clamp(0.0, 1.0);
+            p.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * f, 4.0)), 2.0, Color32::LIGHT_GREEN);
+        }
+
+        if resp.clicked() && busy.is_none() {
+            let manual = matches!(e.source, Source::Manual);
+            if e.exe.is_some() {
+                acts.push((e.id.clone(), Act::Launch));
+            } else if !installed && e.managed {
+                acts.push((e.id.clone(), if manual { Act::Import } else { Act::Update }));
+            }
+        }
+        resp.context_menu(|ui| self.menu_items(ui, e, acts, true));
+
+        let mut tip = format!("{}\n{}", e.name, e.source.describe());
+        if has_update {
+            if let Some(r) = self.latest.get(&e.id) {
+                tip.push_str(&format!("\nUpdate available: {}", r.version));
+            }
+        }
+        if let Some(er) = err {
+            tip.push_str(&format!("\n⚠ {er}"));
+        }
+        tip.push_str("\nClick: launch · Right-click: more");
+        resp.on_hover_text(tip);
+    }
+
+    // ---- list-view card
+
     fn card(&self, ui: &mut egui::Ui, e: &AppEntry, acts: &mut Vec<(String, Act)>) {
         let busy = self.busy.get(&e.id);
         let has_update = self.update_available(e);
@@ -632,35 +960,12 @@ impl Manager {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
+                self.icon(ui, e, 32.0);
                 ui.label(RichText::new(&e.name).heading());
                 ui.label(RichText::new(e.source.label()).small().weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("⋮", |ui| {
-                        if e.source.can_check() && ui.button("Check for update").clicked() {
-                            acts.push((id.clone(), Act::Check));
-                            ui.close_menu();
-                        }
-                        if e.managed && e.source.can_check() && ui.button("Reinstall latest").clicked() {
-                            acts.push((id.clone(), Act::Reinstall));
-                            ui.close_menu();
-                        }
-                        if e.managed && ui.button("Install from downloaded file…").clicked() {
-                            acts.push((id.clone(), Act::Import));
-                            ui.close_menu();
-                        }
-                        if e.managed && ui.button("Open folder").clicked() {
-                            acts.push((id.clone(), Act::OpenDir));
-                            ui.close_menu();
-                        }
-                        if ui.button("Edit…").clicked() {
-                            acts.push((id.clone(), Act::Edit));
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button(RichText::new("Remove…").color(Color32::LIGHT_RED)).clicked() {
-                            acts.push((id.clone(), Act::Remove));
-                            ui.close_menu();
-                        }
+                        self.menu_items(ui, e, acts, false);
                     });
                     if has_update || (!installed && e.managed) {
                         let manual = matches!(e.source, Source::Manual);
@@ -714,6 +1019,7 @@ impl Manager {
 
     fn form_window(&mut self, ctx: &egui::Context) {
         let Some(mut f) = self.form.take() else { return };
+        let groups = self.all_groups();
         let (mut open, mut submit, mut cancel) = (true, false, false);
         let title = if f.editing.is_some() { "Edit app" } else { "Add app" };
 
@@ -746,6 +1052,25 @@ impl Manager {
                 egui::Grid::new("form").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                     ui.label("Name");
                     ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(f32::INFINITY));
+                    ui.end_row();
+
+                    ui.label("Group");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut f.group)
+                                .hint_text("optional – use / for sub-groups, e.g. Games/Emulators")
+                                .desired_width(280.0),
+                        );
+                        if !groups.is_empty() {
+                            egui::ComboBox::from_id_salt("grp_combo").selected_text("existing…").show_ui(ui, |ui| {
+                                for g in &groups {
+                                    if ui.selectable_label(f.group == *g, g).clicked() {
+                                        f.group = g.clone();
+                                    }
+                                }
+                            });
+                        }
+                    });
                     ui.end_row();
 
                     match f.kind {
@@ -890,6 +1215,7 @@ impl Manager {
             self.cfg.apps.retain(|a| a.id != id);
             self.latest.remove(&id);
             self.errors.remove(&id);
+            self.icons.remove(&id);
             self.save();
             self.remove = None;
         } else if no {
@@ -924,9 +1250,14 @@ impl Manager {
 
 impl eframe::App for Manager {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll();
+        self.poll(ctx);
+        self.ensure_icons(ctx);
+        if !self.tile_path.is_empty() && !self.all_groups().contains(&self.tile_path) {
+            self.tile_path.clear();
+        }
 
         let (mut add, mut check_all, mut update_all, mut export, mut import) = (false, false, false, false, false);
+        let mut view_changed = false;
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -950,10 +1281,22 @@ impl eframe::App for Manager {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("🔍 filter").desired_width(160.0));
+                    ui.separator();
+                    // right-to-left: first added = rightmost, so this reads  [List][Tiles]  left→right
+                    view_changed |= ui.selectable_value(&mut self.cfg.view, ViewMode::Tiles, "▦ Tiles").clicked();
+                    view_changed |= ui.selectable_value(&mut self.cfg.view, ViewMode::List, "☰ List").clicked();
+                    if self.cfg.view == ViewMode::Tiles {
+                        let r = ui.add(egui::Slider::new(&mut self.cfg.tile_size, 90.0..=200.0).show_value(false));
+                        view_changed |= r.drag_stopped();
+                    }
                 });
             });
             ui.add_space(4.0);
         });
+
+        if view_changed {
+            self.save();
+        }
 
         let mut acts: Vec<(String, Act)> = Vec::new();
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -966,11 +1309,28 @@ impl eframe::App for Manager {
                 return;
             }
             let q = self.filter.to_lowercase();
+            let ts = self.cfg.tile_size.clamp(90.0, 200.0);
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| q.is_empty() || a.name.to_lowercase().contains(&q)).collect();
-                apps.sort_by_key(|a| a.name.to_lowercase());
-                for e in apps {
-                    self.card(ui, e, &mut acts);
+                if !q.is_empty() {
+                    // searching: flat results, groups ignored
+                    let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| a.name.to_lowercase().contains(&q)).collect();
+                    apps.sort_by_key(|a| a.name.to_lowercase());
+                    if self.cfg.view == ViewMode::Tiles {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                            for e in apps {
+                                self.tile(ui, e, ts, &mut acts);
+                            }
+                        });
+                    } else {
+                        for e in apps {
+                            self.card(ui, e, &mut acts);
+                        }
+                    }
+                } else if self.cfg.view == ViewMode::Tiles {
+                    self.tiles_level(ui, ts, &mut acts);
+                } else {
+                    self.list_level(ui, "", &mut acts);
                 }
             });
         });
@@ -988,7 +1348,11 @@ impl eframe::App for Manager {
         }
 
         if add {
-            self.form = Some(Form::new());
+            let mut f = Form::new();
+            if self.cfg.view == ViewMode::Tiles {
+                f.group = self.tile_path.clone();
+            }
+            self.form = Some(f);
         }
         if export {
             self.export_apps();

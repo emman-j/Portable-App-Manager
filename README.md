@@ -30,3 +30,11 @@ Top bar → **⇅ Backup** → *Export app list…* writes a small JSON (sources
 On the other PC → *Import app list…*, then **⬇ Install / update all**. Duplicates are skipped.
 Manual apps show a **Pick file** button (they have no download source); linked external programs keep their absolute path.
 Alternatively just copy the whole `pam-data/` folder to carry installed files too.
+
+## Views, icons and groups
+- **☰ List / ▦ Tiles** toggle in the top bar (remembered). Tile size slider appears in tile view.
+- **Icons** are read from the selected executable (Windows `.exe` resources). If there is none, an icon file next to the exe
+  (`icon.png`, `<name>.png`, `.DirIcon`, `.ico`) is used, otherwise a coloured letter tile.
+- **Groups**: set a *Group* in Add/Edit (`Games/Emulators` makes nested folders). List view shows a collapsible tree;
+  tile view shows folder tiles (2×2 icon preview) that you click to open, with a breadcrumb bar to go back.
+  Right-click a tile for Update / Edit / Remove. Searching shows a flat result list.
