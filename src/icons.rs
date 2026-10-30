@@ -36,7 +36,7 @@ fn from_pe(path: &Path) -> Option<Vec<u8>> {
 fn first_icon(res: pelite::resources::Resources<'_>) -> Option<Vec<u8>> {
     for (_name, group) in res.icons().filter_map(Result::ok) {
         let mut buf = Vec::new();
-        if group.fill(&mut buf).is_ok() && !buf.is_empty() {
+        if group.write(&mut buf).is_ok() && !buf.is_empty() {
             return Some(buf);
         }
     }
