@@ -1305,6 +1305,7 @@ impl Manager {
             changed |= ui.add(egui::TextEdit::singleline(&mut self.cfg.github_token).password(true).desired_width(300.0)).changed();
             changed |= ui.checkbox(&mut self.cfg.auto_check, "Check for updates on startup").changed();
             ui.separator();
+            ui.label(format!("Version: {VERSION}"));
             ui.label(format!("Data folder: {}", self.paths.root.display()));
             if ui.button("Open data folder").clicked() {
                 let _ = open::that(&self.paths.root);
@@ -1332,6 +1333,8 @@ impl eframe::App for Manager {
             // row 1: title + actions (wraps when the window is narrow)
             ui.horizontal_wrapped(|ui| {
                 ui.heading("Portable App Manager");
+                ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).small().weak())
+                    .on_hover_text(format!("Version {VERSION}"));
                 ui.separator();
                 add = ui.button("➕ Add app").clicked();
                 check_all = ui.button("🔄 Check all").clicked();
@@ -1461,6 +1464,9 @@ impl eframe::App for Manager {
     }
 }
 
+/// e.g. "0.1.0 (a1b2c3d, 2026-11-03)"  -  version comes from Cargo.toml, hash + date from build.rs
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("PAM_GIT_HASH"), ", ", env!("PAM_BUILD_DATE"), ")");
+
 /// Normalised 256x256 version of src/icon/icon.png, produced by build.rs. Replace the source file and rebuild to change the icon.
 const ICON_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon256.png"));
 
@@ -1478,7 +1484,7 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([860.0, 580.0])
         .with_min_inner_size([620.0, 380.0])
-        .with_title("Portable App Manager");
+        .with_title(format!("Portable App Manager v{}", env!("CARGO_PKG_VERSION")));
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }

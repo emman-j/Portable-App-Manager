@@ -10,6 +10,8 @@ use std::{
     env, fs,
     io::Cursor,
     path::{Path, PathBuf},
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const ICON: &str = "src/icon/icon.png";
@@ -22,7 +24,40 @@ fn fail(msg: String) -> ! {
     panic!("\n\n  ICON ERROR: {msg}\n  (set PAM_SKIP_ICON=1 to build without the icon)\n");
 }
 
+/// days since 1970-01-01 -> (year, month, day)
+fn ymd(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (mp * 153 + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    (yoe + era * 400 + if m <= 2 { 1 } else { 0 }, m, d)
+}
+
+/// Build info available in the program as env!("PAM_GIT_HASH") / env!("PAM_BUILD_DATE").
+fn build_info() {
+    let hash = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "nogit".into());
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (y, m, d) = ymd((secs / 86_400) as i64);
+    println!("cargo:rustc-env=PAM_GIT_HASH={hash}");
+    println!("cargo:rustc-env=PAM_BUILD_DATE={y:04}-{m:02}-{d:02}");
+    // re-run (and refresh the date / hash) when sources or the git HEAD change
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+}
+
 fn main() {
+    build_info();
     println!("cargo:rerun-if-changed={ICON}");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=PAM_SKIP_ICON");
