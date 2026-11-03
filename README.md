@@ -8,6 +8,9 @@ Add an app once, then launch, update or remove it from one window. Everything is
 > **Developed with AI tools.** It was written with the help of AI (Claude, by Anthropic).
 > Most of the code is AI-generated, so please review it before relying on it. Bug reports and pull requests are welcome.
 
+## Documentation
+See the [`docs/`](docs/README.md) folder: user guide, sources and matching, building, and architecture.
+
 ## Features
 - **Many sources**: GitHub repo / release, direct download link, custom download page, or fully manual.
 - **Version-proof package names**: `app-win64.zip` matches `app-2.0.1-win64.zip`; wildcards (`app-*-win64.zip`) work too.
@@ -58,7 +61,7 @@ Paste into the single box; the type is auto-detected.
 |---|---|
 | ![List view](docs/screenshots/main-list.png) | ![Tile view](docs/screenshots/main-tiled.png) |
 
-
+![Add app dialog](docs/screenshots/add-app.png)
 
 ### Moving to another PC
 **⇅ Backup → Export app list…** writes a small JSON (sources, package names, groups, args; no files, no token).
