@@ -52,6 +52,15 @@ Paste into the single box; the type is auto-detected.
 - **Icons** come from the selected exe. If there is none, an icon file next to it (`icon.png`, `<name>.png`, `.DirIcon`, `.ico`) is used, otherwise a coloured letter tile.
 - **Groups**: set a *Group* in Add/Edit (`Games/Emulators` makes nested folders).
 
+## Screenshots
+
+| List view | Tile view |
+|---|---|
+| ![List view](docs/screenshots/list-view.png) | ![Tile view](docs/screenshots/tile-view.png) |
+
+![Add app dialog](docs/screenshots/add-app.png)
+
+
 ### Moving to another PC
 **⇅ Backup → Export app list…** writes a small JSON (sources, package names, groups, args; no files, no token).
 On the other PC use **Import app list…**, then **⬇ Install / update all**. Duplicates are skipped.
