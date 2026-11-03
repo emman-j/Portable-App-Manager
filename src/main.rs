@@ -5,6 +5,7 @@ mod install;
 mod model;
 mod net;
 mod util;
+mod version;
 
 use eframe::egui::{self, Color32, RichText};
 use model::{AppEntry, Config, Paths, Source, ViewMode};
@@ -28,6 +29,8 @@ struct Installed {
 enum Msg {
     Progress { id: String, text: String, frac: Option<f32> },
     Checked { id: String, res: Result<net::Remote, String> },
+    /// version read from the exe of a manual / linked app (`None` = could not be read)
+    LocalVersion { id: String, version: Option<String> },
     Installed { id: String, res: Result<Installed, String> },
     Icon { id: String, key: String, img: Option<egui::ColorImage> },
     /// finished copying the data folder to a new location (`None` = the app folder)
@@ -436,7 +439,8 @@ impl Manager {
     // ---- background work
 
     fn check_all(&mut self, ctx: &egui::Context) {
-        let ids: Vec<String> = self.cfg.apps.iter().filter(|a| a.source.can_check()).map(|a| a.id.clone()).collect();
+        // manual / linked apps have no update source: their version is read from the exe instead
+        let ids: Vec<String> = self.cfg.apps.iter().filter(|a| a.source.can_check() || a.exe.is_some()).map(|a| a.id.clone()).collect();
         for id in ids {
             self.start_check(ctx, &id);
         }
@@ -444,7 +448,18 @@ impl Manager {
 
     fn start_check(&mut self, ctx: &egui::Context, id: &str) {
         let Some(e) = self.entry(id).cloned() else { return };
-        if !e.source.can_check() || self.busy.contains_key(id) {
+        if self.busy.contains_key(id) {
+            return;
+        }
+        if !e.source.can_check() {
+            // manual app: read the version from the executable (cheap, local)
+            let Some(exe) = e.exe_path(&self.paths) else { return };
+            let (tx, ctx, id) = (self.tx.clone(), ctx.clone(), id.to_string());
+            thread::spawn(move || {
+                let version = version::exe_version(&exe);
+                let _ = tx.send(Msg::LocalVersion { id, version });
+                ctx.request_repaint();
+            });
             return;
         }
         self.busy.insert(id.into(), ("Checking for updates…".into(), None));
@@ -481,6 +496,18 @@ impl Manager {
                 Msg::Progress { id, text, frac } => {
                     if let Some(b) = self.busy.get_mut(&id) {
                         *b = (text, frac);
+                    }
+                }
+                Msg::LocalVersion { id, version } => {
+                    if let Some(v) = version {
+                        if !self.busy.contains_key(&id) {
+                            if let Some(e) = self.cfg.apps.iter_mut().find(|a| a.id == id) {
+                                if e.version.as_deref() != Some(v.as_str()) {
+                                    e.version = Some(v);
+                                    self.save();
+                                }
+                            }
+                        }
                     }
                 }
                 Msg::Checked { id, res } => {
@@ -901,6 +928,8 @@ impl Manager {
             ui.separator();
         }
         if e.source.can_check() && ui.button("Check for update").clicked() {
+            push(ui, Act::Check);
+        } else if !e.source.can_check() && e.exe.is_some() && ui.button("Refresh version").on_hover_text("Read the version from the executable").clicked() {
             push(ui, Act::Check);
         }
         if e.managed && e.source.can_check() && ui.button("Reinstall latest").clicked() {
