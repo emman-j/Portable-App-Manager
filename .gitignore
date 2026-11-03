@@ -17,7 +17,7 @@ target
 rustc-ice-*.txt
 
 # vscode files
-.code-workspace
+*.code-workspace
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
