@@ -79,7 +79,8 @@ pub struct AppEntry {
 
 impl AppEntry {
     pub fn dir(&self, paths: &Paths) -> PathBuf {
-        paths.apps().join(&self.id)
+        // slug() makes sure an id can never point outside the apps folder (no "..", no absolute paths)
+        paths.apps().join(crate::util::slug(&self.id))
     }
     pub fn exe_path(&self, paths: &Paths) -> Option<PathBuf> {
         let e = self.exe.as_ref()?;
@@ -109,13 +110,38 @@ pub struct Config {
     pub auto_check: bool,
     #[serde(default)]
     pub view: ViewMode,
+    /// current tile (icon) size - saved on exit when `remember_window` is on
     #[serde(default = "default_tile")]
     pub tile_size: f32,
+    /// size used when "remember" is off, or when you press "use default now"
+    #[serde(default = "default_tile")]
+    pub default_tile_size: f32,
+    /// tiles per row in tile view; 0 = as many as fit the window
+    #[serde(default)]
+    pub tile_columns: u32,
+    /// save window size + icon size when closing, restore them on start
+    #[serde(default = "yes")]
+    pub remember_window: bool,
+    #[serde(default)]
+    pub window_size: Option<[f32; 2]>,
+    #[serde(default)]
+    pub window_maximized: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { apps: vec![], github_token: String::new(), auto_check: true, view: ViewMode::List, tile_size: default_tile() }
+        Config {
+            apps: vec![],
+            github_token: String::new(),
+            auto_check: true,
+            view: ViewMode::List,
+            tile_size: default_tile(),
+            default_tile_size: default_tile(),
+            tile_columns: 0,
+            remember_window: true,
+            window_size: None,
+            window_maximized: false,
+        }
     }
 }
 
@@ -125,18 +151,65 @@ pub struct Paths {
 }
 
 impl Paths {
-    pub fn detect() -> Self {
-        let root = if let Some(p) = std::env::var_os("PAM_DATA") {
-            PathBuf::from(p)
-        } else {
-            std::env::current_exe()
-                .ok()
-                .and_then(|e| e.parent().map(|p| p.join("pam-data")))
-                .unwrap_or_else(|| PathBuf::from("pam-data"))
-        };
+    /// PAM_DATA environment variable = exact data folder (overrides everything).
+    pub fn env_override() -> Option<PathBuf> {
+        std::env::var_os("PAM_DATA").map(PathBuf::from)
+    }
+
+    pub fn exe_dir() -> PathBuf {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Small pointer file next to the exe that remembers the chosen location.
+    pub fn pointer_file() -> PathBuf {
+        Self::exe_dir().join("pam-location.txt")
+    }
+
+    pub fn read_pointer() -> Option<PathBuf> {
+        let s = std::fs::read_to_string(Self::pointer_file()).ok()?;
+        let p = PathBuf::from(s.trim());
+        (!p.as_os_str().is_empty()).then_some(p)
+    }
+
+    /// `Some(folder)` = use that folder as the base, `None` = back to the app folder.
+    pub fn write_pointer(base: Option<&Path>) -> Result<(), String> {
+        match base {
+            Some(b) => std::fs::write(Self::pointer_file(), b.to_string_lossy().as_bytes()).map_err(|e| e.to_string()),
+            None => match std::fs::remove_file(Self::pointer_file()) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.to_string()),
+            },
+        }
+    }
+
+    /// The data folder that lives inside a chosen base folder.
+    pub fn root_for(base: &Path) -> PathBuf {
+        base.join("pam-data")
+    }
+
+    pub fn at(root: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&root);
         Paths { root }
     }
+
+    /// Order: PAM_DATA  >  folder chosen in Settings (pam-location.txt)  >  next to the exe.
+    pub fn detect() -> Self {
+        if let Some(p) = Self::env_override() {
+            return Self::at(p);
+        }
+        if let Some(base) = Self::read_pointer() {
+            let root = Self::root_for(&base);
+            if std::fs::create_dir_all(&root).is_ok() {
+                return Paths { root };
+            }
+        }
+        Self::at(Self::root_for(&Self::exe_dir()))
+    }
+
     pub fn config(&self) -> PathBuf {
         self.root.join("config.json")
     }
@@ -150,10 +223,21 @@ impl Paths {
 
 impl Config {
     pub fn load(paths: &Paths) -> Self {
-        std::fs::read_to_string(paths.config())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let mut cfg = match std::fs::read_to_string(paths.config()) {
+            Ok(text) => match serde_json::from_str::<Config>(&text) {
+                Ok(c) => c,
+                Err(_) => {
+                    // keep the unreadable file instead of silently overwriting it on the next save
+                    let _ = std::fs::write(paths.root.join("config.json.bad"), &text);
+                    Config::default()
+                }
+            },
+            Err(_) => Config::default(),
+        };
+        for a in cfg.apps.iter_mut() {
+            a.group = crate::util::norm_group(&a.group); // groups are one level only
+        }
+        cfg
     }
     pub fn save(&self, paths: &Paths) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;

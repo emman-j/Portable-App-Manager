@@ -30,6 +30,16 @@ enum Msg {
     Checked { id: String, res: Result<net::Remote, String> },
     Installed { id: String, res: Result<Installed, String> },
     Icon { id: String, key: String, img: Option<egui::ColorImage> },
+    /// finished copying the data folder to a new location (`None` = the app folder)
+    DataMoved { base: Option<PathBuf>, res: Result<(), String> },
+}
+
+struct DataMove {
+    /// chosen base folder; `None` = back to the folder next to the exe
+    base: Option<PathBuf>,
+    root: PathBuf,
+    can_copy: bool,
+    copy: bool,
 }
 
 struct IconSlot {
@@ -64,7 +74,7 @@ fn run_install(
                     net::resolve(&entry.source, token)?
                 }
             };
-            let dest = tmp.join(format!("{}-{}", entry.id, util::sanitize(&r.filename)));
+            let dest = tmp.join(format!("{}-{}", util::slug(&entry.id), util::sanitize(&r.filename)));
             let label = format!("Downloading {}", r.filename);
             progress(label.clone(), Some(0.0));
             net::download(&r.url, &dest, |done, total| {
@@ -137,7 +147,12 @@ fn parse_github(s: &str) -> Option<(String, Option<String>)> {
     if !prefixed && (parts.len() != 2 || parts[0].contains('.') || !valid(parts[0]) || !valid(parts[1])) {
         return None;
     }
-    let repo = format!("{}/{}", parts[0], parts[1].trim_end_matches(".git"));
+    // validate in BOTH cases (the token is sent with these requests): no "?", "#", "%" ... in owner / repo
+    let name = parts[1].split(|c: char| c == '?' || c == '#').next().unwrap_or("").trim_end_matches(".git");
+    if !valid(parts[0]) || !valid(name) {
+        return None;
+    }
+    let repo = format!("{}/{}", parts[0], name);
     let file = (parts.len() >= 5 && parts[2] == "releases" && parts[3] == "download")
         .then(|| percent_encoding::percent_decode_str(parts[parts.len() - 1]).decode_utf8_lossy().to_string());
     Some((repo, file))
@@ -306,6 +321,8 @@ enum Act {
     Edit,
     /// look for an executable inside the app folder and select it
     Detect,
+    /// dissolve a group (the id slot carries the group path)
+    Ungroup,
     Remove,
     /// open a folder in tile view (the id slot carries the group path)
     Group,
@@ -324,9 +341,15 @@ struct Manager {
     remove: Option<(String, bool)>,
     show_settings: bool,
     toast: Option<(String, Instant)>,
-    tile_path: String,
+    /// the group whose popup window is open (tile view)
+    open_group: Option<String>,
+    import_confirm: bool,
+    data_move: Option<DataMove>,
+    moving: bool,
     icons: HashMap<String, IconSlot>,
     icon_pending: HashSet<String>,
+    last_win: Option<[f32; 2]>,
+    win_maxi: bool,
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -338,8 +361,10 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn join_group(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") }
+enum TileItem<'a> {
+    /// a group (folder) tile, by group name
+    Folder(String),
+    App(&'a AppEntry),
 }
 
 impl Manager {
@@ -360,10 +385,18 @@ impl Manager {
             remove: None,
             show_settings: false,
             toast: None,
-            tile_path: String::new(),
+            open_group: None,
+            import_confirm: false,
+            data_move: None,
+            moving: false,
             icons: HashMap::new(),
             icon_pending: HashSet::new(),
+            last_win: None,
+            win_maxi: false,
         };
+        if !m.cfg.remember_window {
+            m.cfg.tile_size = m.cfg.default_tile_size;
+        }
         if m.cfg.auto_check {
             m.check_all(&cc.egui_ctx);
         }
@@ -454,6 +487,13 @@ impl Manager {
                         }
                     }
                 }
+                Msg::DataMoved { base, res } => {
+                    self.moving = false;
+                    match res {
+                        Ok(()) => self.finish_switch(base),
+                        Err(e) => self.say(format!("Copying the data folder failed: {e}")),
+                    }
+                }
                 Msg::Icon { id, key, img } => {
                     self.icon_pending.remove(&id);
                     let tex = img.map(|i| ctx.load_texture(format!("icon-{id}"), i, egui::TextureOptions::LINEAR));
@@ -498,6 +538,7 @@ impl Manager {
                         self.errors.insert(id, err);
                     } else {
                         self.errors.remove(&id);
+                        self.open_group = None; // like the Start menu: launching closes the folder
                     }
                 }
             }
@@ -542,7 +583,11 @@ impl Manager {
                     }
                 }
             }
-            Act::Group => self.tile_path = id,
+            Act::Ungroup => self.ungroup(&id),
+            Act::Group => {
+                // click a folder tile: open its popup (click again to close)
+                self.open_group = if id.is_empty() || self.open_group.as_deref() == Some(id.as_str()) { None } else { Some(id) };
+            }
             Act::Remove => {
                 // file deletion is opt-in every time: the box starts unchecked
                 self.remove = Some((id, false));
@@ -653,6 +698,7 @@ impl Manager {
         }
     }
 
+    /// Called after the user confirmed the trust warning.
     fn import_apps(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Import app list")
@@ -661,13 +707,18 @@ impl Manager {
         else {
             return;
         };
-        let res: Result<(usize, usize), String> = (|| {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let res: Result<(usize, usize, usize), String> = (|| {
             let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
             let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Not valid JSON: {e}"))?;
             let list = v.get("apps").cloned().ok_or("This file has no \"apps\" list")?;
             let apps: Vec<AppEntry> = serde_json::from_value(list).map_err(|e| format!("Unreadable app list: {e}"))?;
-            let (mut added, mut skipped) = (0, 0);
-            for mut a in apps {
+            let (mut added, mut skipped, mut relink) = (0, 0, 0);
+            for (n, mut a) in apps.into_iter().enumerate() {
+                a.name = a.name.trim().to_string();
+                if a.name.is_empty() {
+                    a.name = "app".into();
+                }
                 let dup = self
                     .cfg
                     .apps
@@ -677,67 +728,91 @@ impl Manager {
                     skipped += 1;
                     continue;
                 }
+                // ids become folder names: never trust them
+                if !util::valid_id(&a.id) {
+                    a.id = format!("{}-{:x}", util::slug(&a.name), (nanos + n as u128) % 0xFFFFFF);
+                }
                 if a.managed {
                     a.version = None;
+                    // the exe must be a plain relative path inside the app folder
+                    if let Some(e) = &a.exe {
+                        let p = std::path::Path::new(e);
+                        if p.is_absolute() || !p.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+                            a.exe = None;
+                        }
+                    }
+                } else {
+                    // linked programs point at a path on the OLD pc: never import it, re-link on this PC
+                    a.exe = None;
+                    relink += 1;
                 }
                 a.group = util::norm_group(&a.group);
                 self.cfg.apps.push(a);
                 added += 1;
             }
-            Ok((added, skipped))
+            Ok((added, skipped, relink))
         })();
         match res {
-            Ok((added, skipped)) => {
+            Ok((added, skipped, relink)) => {
                 self.save();
-                self.say(format!(
-                    "Imported {added} app(s), skipped {skipped} already present. Use “Install all” to download them."
-                ));
+                let mut msg = format!("Imported {added} app(s), skipped {skipped} already present. Use “Install / update all” to download them.");
+                if relink > 0 {
+                    msg.push_str(&format!(" {relink} linked program(s) need their exe re-selected (Edit)."));
+                }
+                self.say(msg);
             }
             Err(e) => self.say(format!("Import failed: {e}")),
         }
+    }
+
+    /// Ask before switching the data folder; nothing changes until the user confirms.
+    fn begin_move(&mut self, base: Option<PathBuf>) {
+        let root = Paths::root_for(&base.clone().unwrap_or_else(Paths::exe_dir));
+        if root == self.paths.root {
+            self.say("That is already the data folder");
+            return;
+        }
+        if root.starts_with(&self.paths.root) {
+            self.say("Choose a folder outside the current data folder");
+            return;
+        }
+        if !self.busy.is_empty() {
+            self.say("Wait until the running downloads have finished");
+            return;
+        }
+        let can_copy = !root.join("config.json").exists();
+        self.data_move = Some(DataMove { base, root, can_copy, copy: can_copy });
+    }
+
+    /// Point the app at the new data folder (the old one is left untouched).
+    fn finish_switch(&mut self, base: Option<PathBuf>) {
+        let root = Paths::root_for(&base.clone().unwrap_or_else(Paths::exe_dir));
+        if let Err(e) = Paths::write_pointer(base.as_deref()) {
+            self.say(format!("Could not save the new location (is the app folder writable?): {e}"));
+            return;
+        }
+        self.paths = Paths::at(root);
+        self.cfg = Config::load(&self.paths);
+        self.latest.clear();
+        self.errors.clear();
+        self.icons.clear();
+        self.icon_pending.clear();
+        self.open_group = None;
+        self.say(format!("Data folder is now {} (the old folder was left in place)", self.paths.root.display()));
     }
 
     // ---- UI pieces
 
     // ---- groups
 
+    /// All group names (groups are one level only), sorted.
     fn all_groups(&self) -> Vec<String> {
-        let mut set = BTreeSet::new();
-        for a in &self.cfg.apps {
-            let mut acc = String::new();
-            for part in a.group.split('/').filter(|p| !p.is_empty()) {
-                if !acc.is_empty() {
-                    acc.push('/');
-                }
-                acc.push_str(part);
-                set.insert(acc.clone());
-            }
-        }
+        let set: BTreeSet<String> = self.cfg.apps.iter().filter(|a| !a.group.is_empty()).map(|a| a.group.clone()).collect();
         set.into_iter().collect()
     }
 
-    /// Names of the direct sub-folders of `prefix`.
-    fn child_groups(&self, prefix: &str) -> Vec<String> {
-        let mut set = BTreeSet::new();
-        for a in &self.cfg.apps {
-            let g = a.group.as_str();
-            let rest = if prefix.is_empty() {
-                g
-            } else if let Some(r) = g.strip_prefix(prefix).and_then(|r| r.strip_prefix('/')) {
-                r
-            } else {
-                continue;
-            };
-            if let Some(first) = rest.split('/').next().filter(|f| !f.is_empty()) {
-                set.insert(first.to_string());
-            }
-        }
-        set.into_iter().collect()
-    }
-
-    fn in_group<'a>(&'a self, full: &'a str) -> impl Iterator<Item = &'a AppEntry> + 'a {
-        let pre = format!("{full}/");
-        self.cfg.apps.iter().filter(move |a| a.group == full || a.group.starts_with(&pre))
+    fn in_group<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a AppEntry> + 'a {
+        self.cfg.apps.iter().filter(move |a| a.group == name)
     }
 
     // ---- icons
@@ -835,74 +910,106 @@ impl Manager {
         }
     }
 
-    // ---- list view (nested tree)
-
-    fn list_level(&self, ui: &mut egui::Ui, prefix: &str, acts: &mut Vec<(String, Act)>) {
-        for name in self.child_groups(prefix) {
-            let full = join_group(prefix, &name);
-            let n = self.in_group(&full).count();
-            egui::CollapsingHeader::new(RichText::new(format!("📁 {name}  ({n})")).strong())
-                .id_salt(("grp", full.clone()))
-                .default_open(true)
-                .show(ui, |ui| self.list_level(ui, &full, acts));
+    /// Dissolve a group: its apps become ungrouped (nothing is deleted).
+    fn ungroup(&mut self, name: &str) {
+        let mut n = 0;
+        for a in self.cfg.apps.iter_mut() {
+            if a.group == name {
+                a.group.clear();
+                n += 1;
+            }
         }
-        let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| a.group == prefix).collect();
+        if self.open_group.as_deref() == Some(name) {
+            self.open_group = None;
+        }
+        self.save();
+        self.say(format!("Ungrouped “{name}” ({n} app(s))"));
+    }
+
+    // ---- list view (collapsible groups, one level)
+
+    fn list_level(&self, ui: &mut egui::Ui, acts: &mut Vec<(String, Act)>) {
+        for name in self.all_groups() {
+            let n = self.in_group(&name).count();
+            let resp = egui::CollapsingHeader::new(RichText::new(format!("📁 {name}  ({n})")).strong())
+                .id_salt(("grp", name.clone()))
+                .default_open(true)
+                .show(ui, |ui| {
+                    let mut apps: Vec<&AppEntry> = self.in_group(&name).collect();
+                    apps.sort_by_key(|a| a.name.to_lowercase());
+                    for e in apps {
+                        self.card(ui, e, acts);
+                    }
+                });
+            let hr = resp.header_response;
+            hr.context_menu(|ui| {
+                if ui.button("Ungroup (move apps out of this group)").clicked() {
+                    acts.push((name.clone(), Act::Ungroup));
+                    ui.close_menu();
+                }
+            });
+            hr.on_hover_text("Right-click for options");
+        }
+        let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| a.group.is_empty()).collect();
         apps.sort_by_key(|a| a.name.to_lowercase());
         for e in apps {
             self.card(ui, e, acts);
         }
     }
 
-    // ---- tile view (folders open like a Start-menu folder, with breadcrumbs)
+    // ---- tile view: group tiles + ungrouped apps; clicking a group opens a popup window
 
     fn tiles_level(&self, ui: &mut egui::Ui, ts: f32, acts: &mut Vec<(String, Act)>) {
-        if !self.tile_path.is_empty() {
-            ui.horizontal(|ui| {
-                if ui.link("🏠 Home").clicked() {
-                    acts.push((String::new(), Act::Group));
-                }
-                let mut acc = String::new();
-                for part in self.tile_path.split('/').filter(|p| !p.is_empty()) {
-                    if !acc.is_empty() {
-                        acc.push('/');
-                    }
-                    acc.push_str(part);
-                    ui.label("›");
-                    if ui.link(part).clicked() {
-                        acts.push((acc.clone(), Act::Group));
-                    }
-                }
-            });
-            ui.add_space(6.0);
-        }
-        let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| a.group == self.tile_path).collect();
+        let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| a.group.is_empty()).collect();
         apps.sort_by_key(|a| a.name.to_lowercase());
-        let folders = self.child_groups(&self.tile_path);
-        if apps.is_empty() && folders.is_empty() {
-            ui.label(RichText::new("This folder is empty.").weak());
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-            for name in &folders {
-                self.folder_tile(ui, &join_group(&self.tile_path, name), name, ts, acts);
-            }
-            for e in apps {
-                self.tile(ui, e, ts, acts);
-            }
-        });
+        let mut items: Vec<TileItem> = self.all_groups().into_iter().map(TileItem::Folder).collect();
+        items.extend(apps.into_iter().map(TileItem::App));
+        self.tile_grid(ui, ts, &items, acts);
     }
 
-    fn folder_tile(&self, ui: &mut egui::Ui, full: &str, name: &str, ts: f32, acts: &mut Vec<(String, Act)>) {
+    /// Lay tiles out: as many per row as fit (columns = 0), or exactly `tile_columns` per row
+    /// (tiles shrink if the window is too narrow for that many).
+    fn tile_grid(&self, ui: &mut egui::Ui, ts: f32, items: &[TileItem<'_>], acts: &mut Vec<(String, Act)>) {
+        let gap = 10.0;
+        let cols = self.cfg.tile_columns as usize;
+        let draw = |ui: &mut egui::Ui, it: &TileItem<'_>, size: f32, acts: &mut Vec<(String, Act)>| match it {
+            TileItem::Folder(name) => self.folder_tile(ui, name, size, acts),
+            TileItem::App(e) => self.tile(ui, e, size, acts),
+        };
+        if cols == 0 {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                for it in items {
+                    draw(ui, it, ts, acts);
+                }
+            });
+        } else {
+            let fit = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+            let size = ts.min(fit).max(60.0);
+            for row in items.chunks(cols) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for it in row {
+                        draw(ui, it, size, acts);
+                    }
+                });
+                ui.add_space(gap);
+            }
+        }
+    }
+
+    fn folder_tile(&self, ui: &mut egui::Ui, name: &str, ts: f32, acts: &mut Vec<(String, Act)>) {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ts, ts * 1.2), egui::Sense::click());
+        let is_open = self.open_group.as_deref() == Some(name);
         let vis = ui.visuals();
-        let fill = if resp.hovered() { vis.widgets.hovered.bg_fill } else { vis.widgets.inactive.weak_bg_fill };
-        let stroke = vis.widgets.noninteractive.bg_stroke;
+        let fill = if resp.hovered() || is_open { vis.widgets.hovered.bg_fill } else { vis.widgets.inactive.weak_bg_fill };
+        let stroke = if is_open { vis.widgets.hovered.bg_stroke } else { vis.widgets.noninteractive.bg_stroke };
         let (txt, weak) = (vis.text_color(), vis.weak_text_color());
         let p = ui.painter();
         p.rect_filled(rect, 8.0, fill);
         p.rect_stroke(rect, 8.0, stroke);
 
-        let members: Vec<&AppEntry> = self.in_group(full).collect();
+        let members: Vec<&AppEntry> = self.in_group(name).collect();
         let area = ts * 0.56;
         let origin = egui::pos2(rect.center().x - area / 2.0, rect.top() + ts * 0.1);
         p.rect_filled(egui::Rect::from_min_size(origin - egui::vec2(5.0, 5.0), egui::vec2(area + 10.0, area + 10.0)), 8.0, Color32::from_white_alpha(18));
@@ -916,8 +1023,55 @@ impl Manager {
         let max = ((ts - 10.0) / 7.0) as usize;
         p.text(egui::pos2(rect.center().x, y), egui::Align2::CENTER_TOP, truncate(name, max), egui::FontId::proportional(13.0), txt);
         p.text(egui::pos2(rect.center().x, y + 17.0), egui::Align2::CENTER_TOP, format!("{} apps", members.len()), egui::FontId::proportional(11.0), weak);
+        resp.context_menu(|ui| {
+            if ui.button("Open").clicked() {
+                acts.push((name.to_string(), Act::Group));
+                ui.close_menu();
+            }
+            if ui.button("Ungroup (move apps out)").clicked() {
+                acts.push((name.to_string(), Act::Ungroup));
+                ui.close_menu();
+            }
+        });
         if resp.clicked() {
-            acts.push((full.to_string(), Act::Group));
+            acts.push((name.to_string(), Act::Group));
+        }
+    }
+
+    /// The open group as a floating window (like a Start-menu folder): group title on top, tiles inside.
+    fn group_window(&mut self, ctx: &egui::Context, acts: &mut Vec<(String, Act)>) {
+        let Some(name) = self.open_group.clone() else { return };
+        let mut apps: Vec<&AppEntry> = self.in_group(&name).collect();
+        apps.sort_by_key(|a| a.name.to_lowercase());
+        let items: Vec<TileItem> = apps.into_iter().map(TileItem::App).collect();
+        let ts = self.cfg.tile_size.clamp(90.0, 200.0);
+        let cols = if self.cfg.tile_columns == 0 { 3 } else { self.cfg.tile_columns as usize };
+        let screen = ctx.screen_rect();
+        let width = (cols as f32 * (ts + 10.0) + 28.0).min(screen.width() - 40.0);
+        let mut open = true;
+        egui::Window::new(format!("📁 {name}"))
+            .id(egui::Id::new("group_popup"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(width)
+            .default_pos(screen.center() - egui::vec2(width / 2.0, 160.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{} app(s)", items.len())).weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Ungroup").on_hover_text("Move these apps out of the group").clicked() {
+                            acts.push((name.clone(), Act::Ungroup));
+                        }
+                    });
+                });
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(screen.height() * 0.7).auto_shrink([true, true]).show(ui, |ui| {
+                    self.tile_grid(ui, ts, &items, acts);
+                });
+            });
+        if !open {
+            self.open_group = None;
         }
     }
 
@@ -1105,7 +1259,7 @@ impl Manager {
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut f.group)
-                                .hint_text("optional – use / for sub-groups, e.g. Games/Emulators")
+                                .hint_text("optional – one level only, e.g. Games")
                                 .desired_width(280.0),
                         );
                         if !groups.is_empty() {
@@ -1300,30 +1454,197 @@ impl Manager {
         }
         let mut open = true;
         let mut changed = false;
+        let (mut change_loc, mut reset_loc) = (false, false);
         egui::Window::new("Settings").open(&mut open).collapsible(false).show(ctx, |ui| {
             ui.label("GitHub token (optional – raises the API rate limit):");
             changed |= ui.add(egui::TextEdit::singleline(&mut self.cfg.github_token).password(true).desired_width(300.0)).changed();
             changed |= ui.checkbox(&mut self.cfg.auto_check, "Check for updates on startup").changed();
             ui.separator();
+            ui.strong("Tiles & groups");
+            changed |= ui.add(egui::Slider::new(&mut self.cfg.default_tile_size, 90.0..=200.0).text("Default icon size")).changed();
+            ui.horizontal(|ui| {
+                ui.label("Columns per row");
+                changed |= ui.add(egui::DragValue::new(&mut self.cfg.tile_columns).range(0..=12)).changed();
+                ui.label(RichText::new("0 = as many as fit the window").weak());
+            });
+            if ui.button("Use the default icon size now").clicked() {
+                self.cfg.tile_size = self.cfg.default_tile_size;
+                changed = true;
+            }
+            ui.separator();
+            ui.strong("Window");
+            changed |= ui.checkbox(&mut self.cfg.remember_window, "Remember window size and icon size when closing").changed();
+            let ws = match self.cfg.window_size {
+                Some([w, h]) => format!("{w:.0} × {h:.0}{}", if self.cfg.window_maximized { " (maximized)" } else { "" }),
+                None => "nothing saved yet".to_string(),
+            };
+            ui.label(RichText::new(format!("Saved: window {ws}, icon size {:.0}", self.cfg.tile_size)).weak());
+            if ui.button("Forget saved window size").clicked() {
+                self.cfg.window_size = None;
+                self.cfg.window_maximized = false;
+                changed = true;
+            }
+            ui.separator();
             ui.label(format!("Version: {VERSION}"));
-            ui.label(format!("Data folder: {}", self.paths.root.display()));
-            if ui.button("Open data folder").clicked() {
-                let _ = open::that(&self.paths.root);
+            ui.strong("Data folder");
+            ui.label(self.paths.root.display().to_string());
+            if Paths::env_override().is_some() {
+                ui.label(RichText::new("Set by the PAM_DATA environment variable - it can't be changed here.").weak());
+            } else {
+                ui.label(RichText::new("Pick a folder: the app keeps its data in a \"pam-data\" folder inside it.").weak());
+                ui.horizontal(|ui| {
+                    if ui.button("Change location…").clicked() {
+                        change_loc = true;
+                    }
+                    if Paths::read_pointer().is_some() && ui.button("Reset to app folder").clicked() {
+                        reset_loc = true;
+                    }
+                    if ui.button("Open").clicked() {
+                        let _ = open::that(&self.paths.root);
+                    }
+                });
             }
         });
         if changed {
             self.save();
         }
         self.show_settings = open;
+        if change_loc {
+            if let Some(base) = rfd::FileDialog::new().set_title("Choose the folder that will contain pam-data").pick_folder() {
+                self.begin_move(Some(base));
+            }
+        }
+        if reset_loc {
+            self.begin_move(None);
+        }
+    }
+
+    /// Trust warning shown before an app list is imported.
+    fn import_window(&mut self, ctx: &egui::Context) {
+        if !self.import_confirm {
+            return;
+        }
+        let (mut choose, mut cancel) = (false, false);
+        egui::Window::new("Import app list")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.label(RichText::new("⚠ Only import lists from sources you trust.").strong().color(Color32::YELLOW));
+                ui.add_space(4.0);
+                ui.label("An imported list tells this app where to download programs from. When you install them, the files are downloaded from the internet, extracted and can then be launched on your PC. A list from an untrusted source can point to malicious downloads.");
+                ui.add_space(4.0);
+                ui.label(RichText::new("Entries are sanity-checked (unsafe folder names and paths are rejected, linked programs must be re-selected), but the downloaded files themselves are not verified.").weak());
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(RichText::new("I trust it - choose file…").strong()).clicked() {
+                        choose = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if choose {
+            self.import_confirm = false;
+            self.import_apps();
+        } else if cancel {
+            self.import_confirm = false;
+        }
+    }
+
+    /// Confirmation (and progress) for moving the data folder.
+    fn move_window(&mut self, ctx: &egui::Context) {
+        if self.moving {
+            egui::Window::new("Copying data…")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Copying your apps and settings to the new folder…");
+                    });
+                });
+            return;
+        }
+        let Some(mut m) = self.data_move.take() else { return };
+        let (mut go, mut cancel) = (false, false);
+        egui::Window::new("Change data folder")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label("New data folder:");
+                ui.label(RichText::new(m.root.display().to_string()).strong());
+                ui.add_space(4.0);
+                if m.can_copy {
+                    ui.checkbox(&mut m.copy, "Copy my current apps and settings there");
+                } else {
+                    ui.label(RichText::new("A pam-data folder with settings already exists there - it will be used as it is (nothing is copied).").weak());
+                }
+                ui.label(RichText::new("The current data folder is not deleted.").weak());
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(RichText::new("Switch").strong()).clicked() {
+                        go = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if go {
+            if m.can_copy && m.copy {
+                self.moving = true;
+                let (tx, ctx2, from, to, base) = (self.tx.clone(), ctx.clone(), self.paths.root.clone(), m.root.clone(), m.base.clone());
+                thread::spawn(move || {
+                    let res = install::copy_dir_all(&from, &to);
+                    let _ = tx.send(Msg::DataMoved { base, res });
+                    ctx2.request_repaint();
+                });
+            } else {
+                self.finish_switch(m.base);
+            }
+        } else if !cancel {
+            self.data_move = Some(m);
+        }
     }
 }
 
 impl eframe::App for Manager {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.cfg.remember_window {
+            if let Some(sz) = self.last_win {
+                self.cfg.window_size = Some(sz);
+            }
+            self.cfg.window_maximized = self.win_maxi;
+            self.save();
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.ensure_icons(ctx);
-        if !self.tile_path.is_empty() && !self.all_groups().contains(&self.tile_path) {
-            self.tile_path.clear();
+        // remember the (non-maximized) window size so it can be saved on exit
+        ctx.input(|i| {
+            let vp = i.viewport();
+            self.win_maxi = vp.maximized.unwrap_or(false);
+            if !self.win_maxi && vp.minimized != Some(true) {
+                if let Some(r) = vp.inner_rect {
+                    let sz = r.size();
+                    if sz.x >= 300.0 && sz.y >= 200.0 {
+                        self.last_win = Some([sz.x, sz.y]);
+                    }
+                }
+            }
+        });
+        if let Some(g) = &self.open_group {
+            if self.cfg.view != ViewMode::Tiles || !self.all_groups().contains(g) {
+                self.open_group = None;
+            }
         }
 
         let (mut add, mut check_all, mut update_all, mut export, mut import) = (false, false, false, false, false);
@@ -1391,12 +1712,8 @@ impl eframe::App for Manager {
                     let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| a.name.to_lowercase().contains(&q)).collect();
                     apps.sort_by_key(|a| a.name.to_lowercase());
                     if self.cfg.view == ViewMode::Tiles {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-                            for e in apps {
-                                self.tile(ui, e, ts, &mut acts);
-                            }
-                        });
+                        let items: Vec<TileItem> = apps.into_iter().map(TileItem::App).collect();
+                        self.tile_grid(ui, ts, &items, &mut acts);
                     } else {
                         for e in apps {
                             self.card(ui, e, &mut acts);
@@ -1405,7 +1722,7 @@ impl eframe::App for Manager {
                 } else if self.cfg.view == ViewMode::Tiles {
                     self.tiles_level(ui, ts, &mut acts);
                 } else {
-                    self.list_level(ui, "", &mut acts);
+                    self.list_level(ui, &mut acts);
                 }
             });
         });
@@ -1425,7 +1742,7 @@ impl eframe::App for Manager {
         if add {
             let mut f = Form::new();
             if self.cfg.view == ViewMode::Tiles {
-                f.group = self.tile_path.clone();
+                f.group = self.open_group.clone().unwrap_or_default();
             }
             self.form = Some(f);
         }
@@ -1433,7 +1750,7 @@ impl eframe::App for Manager {
             self.export_apps();
         }
         if import {
-            self.import_apps();
+            self.import_confirm = true; // ask first, see import_window()
         }
         if check_all {
             self.check_all(ctx);
@@ -1454,6 +1771,7 @@ impl eframe::App for Manager {
                 self.start_install(ctx, &id, src);
             }
         }
+        self.group_window(ctx, &mut acts);
         for (id, a) in acts {
             self.act(ctx, id, a);
         }
@@ -1461,6 +1779,8 @@ impl eframe::App for Manager {
         self.form_window(ctx);
         self.remove_window(ctx);
         self.settings_window(ctx);
+        self.import_window(ctx);
+        self.move_window(ctx);
     }
 }
 
@@ -1481,14 +1801,24 @@ fn window_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result<()> {
+    let saved = Config::load(&Paths::detect());
+    let size = saved
+        .window_size
+        .filter(|_| saved.remember_window)
+        .map(|[w, h]| [w.clamp(620.0, 7680.0), h.clamp(380.0, 4320.0)])
+        .unwrap_or([860.0, 580.0]);
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([860.0, 580.0])
+        .with_inner_size(size)
         .with_min_inner_size([620.0, 380.0])
         .with_title(format!("Portable App Manager v{}", env!("CARGO_PKG_VERSION")));
+    if saved.remember_window && saved.window_maximized {
+        viewport = viewport.with_maximized(true);
+    }
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    // centered: open in the middle of the screen (not supported on Wayland)
+    let options = eframe::NativeOptions { viewport, centered: true, ..Default::default() };
     eframe::run_native(
         "Portable App Manager",
         options,

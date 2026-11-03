@@ -94,7 +94,7 @@ fn extract_zip(file: &Path, dest: &Path) -> Result<(), String> {
         {
             use std::os::unix::fs::PermissionsExt;
             if let Some(mode) = e.unix_mode() {
-                let _ = fs::set_permissions(&out, fs::Permissions::from_mode(mode));
+                let _ = fs::set_permissions(&out, fs::Permissions::from_mode(mode & 0o777));
             }
         }
     }
@@ -132,7 +132,20 @@ fn extract_targz(file: &Path, dest: &Path) -> Result<(), String> {
 
 /// Extract a .7z into a scratch folder inside `dest`, strip a single common
 /// top-level folder (like zip/tar.gz do), then merge the result into `dest`.
+///
+/// Safety: every entry name is validated BEFORE extracting (no "..", no absolute paths / drive letters),
+/// and symlinks are never followed or merged.
 fn extract_7z(file: &Path, dest: &Path) -> Result<(), String> {
+    {
+        let rd = sevenz_rust::SevenZReader::open(file, sevenz_rust::Password::empty())
+            .map_err(|e| format!("7z open failed: {e}"))?;
+        for entry in &rd.archive().files {
+            if rel_path(Path::new(entry.name()), None).is_none() {
+                return Err(format!("Refusing to extract: unsafe path in archive: {}", entry.name()));
+            }
+        }
+    }
+
     let scratch = dest.join(".pam-7z-extract");
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
@@ -145,7 +158,9 @@ fn extract_7z(file: &Path, dest: &Path) -> Result<(), String> {
             .flatten()
             .map(|e| e.path())
             .collect();
-        let src = if entries.len() == 1 && entries[0].is_dir() { entries[0].clone() } else { scratch.clone() };
+        // symlink_metadata: a symlink to a folder is NOT treated as a folder
+        let single_dir = entries.len() == 1 && fs::symlink_metadata(&entries[0]).map(|m| m.is_dir()).unwrap_or(false);
+        let src = if single_dir { entries[0].clone() } else { scratch.clone() };
         merge_move(&src, dest)
     })();
 
@@ -153,16 +168,20 @@ fn extract_7z(file: &Path, dest: &Path) -> Result<(), String> {
     result
 }
 
-/// Move everything in `from` into `to`, merging folders and overwriting files.
+/// Move everything in `from` into `to`, merging folders and overwriting files. Symlinks are skipped.
 fn merge_move(from: &Path, to: &Path) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|e| e.to_string())?;
     for e in fs::read_dir(from).map_err(|e| e.to_string())?.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
         let src = e.path();
         let dst = to.join(e.file_name());
-        if src.is_dir() {
+        if ft.is_dir() {
             merge_move(&src, &dst)?;
         } else {
-            if dst.exists() {
+            if fs::symlink_metadata(&dst).is_ok() {
                 fs::remove_file(&dst).map_err(|e| format!("{}: {e}", dst.display()))?;
             }
             if fs::rename(&src, &dst).is_err() {
@@ -171,6 +190,31 @@ fn merge_move(from: &Path, to: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Copy a whole folder (used when moving the data folder). Symlinks and a top-level `tmp` are skipped.
+pub fn copy_dir_all(from: &Path, to: &Path) -> Result<(), String> {
+    fn inner(from: &Path, to: &Path, top: bool) -> Result<(), String> {
+        fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+        for e in fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))?.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            let name = e.file_name();
+            if top && name.to_string_lossy().eq_ignore_ascii_case("tmp") {
+                continue;
+            }
+            let (s, d) = (e.path(), to.join(&name));
+            if ft.is_dir() {
+                inner(&s, &d, false)?;
+            } else {
+                fs::copy(&s, &d).map_err(|e| format!("{}: {e}", s.display()))?;
+            }
+        }
+        Ok(())
+    }
+    inner(from, to, true)
 }
 
 // ---------------------------------------------------------------- executables

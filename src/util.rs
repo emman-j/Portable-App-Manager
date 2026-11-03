@@ -164,11 +164,16 @@ pub fn strip_ext(name: &str) -> String {
     name.to_string()
 }
 
-/// "Games \ Emulators/" -> "Games/Emulators"
+/// Groups are ONE level only. Separators are flattened:  "Games / Emulators" -> "Games - Emulators"
 pub fn norm_group(s: &str) -> String {
     s.split(|c: char| c == '/' || c == '\\')
         .map(|p| p.trim())
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
-        .join("/")
+        .join(" - ")
+}
+
+/// App ids become folder names, so they must be plain: letters, digits, '-' and '_'.
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 80 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }

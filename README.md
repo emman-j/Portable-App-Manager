@@ -18,8 +18,10 @@ See the [`docs/`](docs/README.md) folder: user guide, sources and matching, buil
 - **Launcher + manager**: launch, check for updates, update / install all, reinstall, open folder, edit, remove.
 - **Archives**: `.zip`, `.7z`, `.tar.gz` / `.tgz` are extracted (a single top-level folder is flattened). Any other file (exe, AppImage) is copied as-is.
 - **List and tile views** with app icons taken from the selected executable.
-- **Groups**: nested folders in list view, Start-menu-style folder tiles in tile view.
-- **Backup**: export / import your app list to set up another PC.
+- **Groups** (one level): collapsible folders in list view; in tile view a group opens as a popup window with its tiles. Ungroup with a right-click.
+- **Tile settings**: default icon size, columns per row, and remembered window / icon size (Settings ⚙).
+- **Backup**: export / import your app list to set up another PC (import asks you to confirm you trust the source).
+- **Data folder**: stored next to the exe by default; choose another location in Settings.
 - **Safe removal**: deleting an app's files always asks for confirmation (the box starts unchecked).
 
 ## Build
@@ -73,6 +75,12 @@ Replace `src/icon/icon.png` (square, ideally 256x256 or larger) and rebuild. `bu
 
 ## Version
 Set in `Cargo.toml` (`version = "x.y.z"`). It appears in the window title, the top bar and Settings, together with the git hash and build date.
+
+## Security notes
+- **Only import app lists you trust.** A list decides what gets downloaded; the app warns you before importing.
+- Downloads are not checksum-verified, and `http://` links are accepted. Prefer `https://` sources you trust.
+- Archives are extracted with path checks (zip, tar and 7z reject `..` and absolute paths; symlinks in 7z archives are skipped).
+- The GitHub token is stored in plain text in `config.json`.
 
 ## Notes
 - The exe is not code-signed, so Windows SmartScreen may warn on first run.

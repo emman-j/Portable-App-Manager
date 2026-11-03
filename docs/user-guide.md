@@ -1,7 +1,7 @@
 # User guide
 
 ## Where things are stored
-Everything lives in a `pam-data` folder next to the exe (set the `PAM_DATA` environment variable to use another place):
+Everything lives in a `pam-data` folder next to the exe by default. You can move it in **Settings → Data folder → Change location…**: pick a folder and the app keeps its data in a `pam-data` folder inside it (the choice is remembered in a small `pam-location.txt` next to the exe). The `PAM_DATA` environment variable, if set, overrides everything and is used as the exact data folder.
 
 ```
 pam-data/
@@ -54,20 +54,28 @@ Updates are extracted over the existing folder, so settings a portable app store
 The icon is read from the selected executable. If it has none, an icon file near the exe is used (`icon.png`, `<name>.png`, `.DirIcon`, `.ico`), otherwise a coloured tile with the first letter.
 
 ## Groups
-Give an app a **Group** such as `Games/Emulators`; `/` creates nesting.
-- **List view**: collapsible folders with an app count, sub-folders first.
-- **Tile view**: folder tiles with a 2×2 icon preview. Click a folder to open it; use the **Home › Games › …** bar to go back.
+Give an app a **Group** such as `Games`. Groups are **one level only** (no groups inside groups); a name with `/` is flattened (`Games/Emulators` becomes `Games - Emulators`).
+- **List view**: collapsible folders with an app count; ungrouped apps are listed after them.
+- **Tile view**: a group is a folder tile with a 2×2 icon preview. Click it and the group opens in a **floating window** with the group name as its title and the app tiles inside, like a Start-menu folder. Drag the window around, resize it, or close it with ✕ (click the folder tile again to close it too). Launching an app from it closes the window.
+- **Ungroup**: right-click a group header (list view) or a folder tile (tile view), or press **Ungroup** in the group window. The apps become ungrouped; nothing is deleted.
 - A group exists only while an app is in it. To rename a group, change the Group field of its apps.
 
 ## Backup and moving to another PC
 **⇅ Backup → Export app list…** writes a JSON file with each app's name, source, package name, group, launch args and executable. It contains no downloaded files and no GitHub token.
 
-On the other PC: **⇅ Backup → Import app list…**, then **⬇ Install / update all**. Apps that already exist (same id, or same name and source) are skipped. Manual apps have no download source, so they show **📂 Pick file**.
+On the other PC: **⇅ Backup → Import app list…**, then **⬇ Install / update all**.
+
+> ⚠ **Only import lists from sources you trust.** A list tells the app where to download programs from; installing them downloads the files from the internet, extracts them, and you can then launch them. The app asks you to confirm this before importing. Imported entries are sanity-checked (unsafe ids and paths are rejected, linked programs must be re-selected), but downloads themselves are not verified.
+
+ Apps that already exist (same id, or same name and source) are skipped. Manual apps have no download source, so they show **📂 Pick file**.
 
 ## Settings (⚙)
 - **GitHub token** (optional): raises the GitHub API rate limit. Stored in `config.json` in plain text.
 - **Check for updates on startup**.
-- Shows the version and the data folder.
+- **Tiles & groups**: the default icon size and the number of columns per row in tile view (0 = as many as fit the window; with a fixed number, tiles shrink if the window is too narrow).
+- **Window**: *Remember window size and icon size when closing* saves them on exit and restores them on the next start. *Use the default icon size now* and *Forget saved window size* reset them.
+- **Data folder**: shows where your data lives and lets you change it. When you switch, you can copy your apps and settings to the new place (the old folder is left untouched). Not available while `PAM_DATA` is set.
+- Shows the version.
 
 ## Troubleshooting
 | Problem | Fix |

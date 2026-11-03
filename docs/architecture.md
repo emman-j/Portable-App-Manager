@@ -17,8 +17,8 @@ src/
 ## Data model (`model.rs`)
 - `Source`: `GitHub { repo, pattern, prerelease }`, `Direct { url }`, `Site { page_url, link_regex, pattern, version_regex }`, `Manual`.
 - `AppEntry`: id, name, source, installed version, executable (relative to the app folder, or absolute for linked programs), launch args, `managed` flag, group.
-- `Config`: the app list, GitHub token, auto-check flag, view mode and tile size. Saved as `pam-data/config.json` (written to a temp file, then renamed).
-- `Paths`: `pam-data`, `apps/`, `tmp/`.
+- `Config`: the app list, GitHub token, auto-check flag, view mode, tile size / default size / columns, and the remembered window size. Saved as `pam-data/config.json` (written to a temp file, then renamed).
+- `Paths`: `pam-data`, `apps/`, `tmp/`. The data folder is `PAM_DATA` if set, else the folder chosen in Settings (stored in `pam-location.txt` next to the exe), else `pam-data` next to the exe. App folders are always `apps/<slug(id)>`, so an id can never point outside `apps/`.
 
 ## The UI loop (`main.rs`)
 `Manager` implements `eframe::App`. egui is immediate mode: `update()` runs every frame and draws everything from the current state.
