@@ -56,9 +56,8 @@ Paste into the single box; the type is auto-detected.
 
 | List view | Tile view |
 |---|---|
-| ![List view](docs/screenshots/list-view.png) | ![Tile view](docs/screenshots/tile-view.png) |
+| ![List view](docs/screenshots/main-list.png) | ![Tile view](docs/screenshots/main-tiled.png) |
 
-![Add app dialog](docs/screenshots/add-app.png)
 
 
 ### Moving to another PC
