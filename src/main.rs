@@ -323,6 +323,8 @@ enum Act {
     Detect,
     /// dissolve a group (the id slot carries the group path)
     Ungroup,
+    /// rename a group (the id slot carries the group name)
+    RenameGroup,
     Remove,
     /// open a folder in tile view (the id slot carries the group path)
     Group,
@@ -343,6 +345,10 @@ struct Manager {
     toast: Option<(String, Instant)>,
     /// the group whose popup window is open (tile view)
     open_group: Option<String>,
+    /// bumped every time a group popup is opened, so it starts at a fresh, fitted size
+    group_gen: u32,
+    /// group rename dialog: (old name, text being edited)
+    rename: Option<(String, String)>,
     import_confirm: bool,
     data_move: Option<DataMove>,
     moving: bool,
@@ -386,6 +392,8 @@ impl Manager {
             show_settings: false,
             toast: None,
             open_group: None,
+            group_gen: 0,
+            rename: None,
             import_confirm: false,
             data_move: None,
             moving: false,
@@ -584,9 +592,15 @@ impl Manager {
                 }
             }
             Act::Ungroup => self.ungroup(&id),
+            Act::RenameGroup => self.rename = Some((id.clone(), id)),
             Act::Group => {
                 // click a folder tile: open its popup (click again to close)
-                self.open_group = if id.is_empty() || self.open_group.as_deref() == Some(id.as_str()) { None } else { Some(id) };
+                self.open_group = if id.is_empty() || self.open_group.as_deref() == Some(id.as_str()) {
+                    None
+                } else {
+                    self.group_gen = self.group_gen.wrapping_add(1);
+                    Some(id)
+                };
             }
             Act::Remove => {
                 // file deletion is opt-in every time: the box starts unchecked
@@ -926,6 +940,78 @@ impl Manager {
         self.say(format!("Ungrouped “{name}” ({n} app(s))"));
     }
 
+    /// Rename a group. If the new name already exists the two groups are merged.
+    fn rename_group(&mut self, old: &str, new: &str) -> Result<(), String> {
+        let new = util::norm_group(new);
+        if new.is_empty() {
+            return Err("Give the group a name".into());
+        }
+        if new == old {
+            return Ok(());
+        }
+        let merged = self.cfg.apps.iter().any(|a| a.group == new);
+        for a in self.cfg.apps.iter_mut() {
+            if a.group == old {
+                a.group = new.clone();
+            }
+        }
+        if self.open_group.as_deref() == Some(old) {
+            self.open_group = Some(new.clone());
+        }
+        self.save();
+        self.say(if merged {
+            format!("Merged “{old}” into “{new}”")
+        } else {
+            format!("Renamed “{old}” to “{new}”")
+        });
+        Ok(())
+    }
+
+    fn rename_window(&mut self, ctx: &egui::Context) {
+        let Some((old, mut text)) = self.rename.clone() else { return };
+        let (mut ok, mut cancel) = (false, false);
+        let mut open = true;
+        egui::Window::new("Rename group")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("New name for “{old}”:"));
+                let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(260.0));
+                if !r.has_focus() && ui.memory(|m| m.focused().is_none()) {
+                    r.request_focus();
+                }
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    ok = true;
+                }
+                if text.trim() != old && self.all_groups().iter().any(|g| *g == util::norm_group(&text)) {
+                    ui.label(RichText::new("A group with this name exists - the apps will be merged into it.").weak());
+                }
+                ui.horizontal(|ui| {
+                    if ui.button(RichText::new("Rename").strong()).clicked() {
+                        ok = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if ok {
+            match self.rename_group(&old, &text) {
+                Ok(()) => self.rename = None,
+                Err(e) => {
+                    self.say(e);
+                    self.rename = Some((old, text));
+                }
+            }
+        } else if cancel || !open {
+            self.rename = None;
+        } else {
+            self.rename = Some((old, text));
+        }
+    }
+
     // ---- list view (collapsible groups, one level)
 
     fn list_level(&self, ui: &mut egui::Ui, acts: &mut Vec<(String, Act)>) {
@@ -943,6 +1029,10 @@ impl Manager {
                 });
             let hr = resp.header_response;
             hr.context_menu(|ui| {
+                if ui.button("Rename group…").clicked() {
+                    acts.push((name.clone(), Act::RenameGroup));
+                    ui.close_menu();
+                }
                 if ui.button("Ungroup (move apps out of this group)").clicked() {
                     acts.push((name.clone(), Act::Ungroup));
                     ui.close_menu();
@@ -964,14 +1054,13 @@ impl Manager {
         apps.sort_by_key(|a| a.name.to_lowercase());
         let mut items: Vec<TileItem> = self.all_groups().into_iter().map(TileItem::Folder).collect();
         items.extend(apps.into_iter().map(TileItem::App));
-        self.tile_grid(ui, ts, &items, acts);
+        self.tile_grid(ui, ts, 0, &items, acts);
     }
 
-    /// Lay tiles out: as many per row as fit (columns = 0), or exactly `tile_columns` per row
-    /// (tiles shrink if the window is too narrow for that many).
-    fn tile_grid(&self, ui: &mut egui::Ui, ts: f32, items: &[TileItem<'_>], acts: &mut Vec<(String, Act)>) {
+    /// Lay tiles out: as many per row as fit the window (`cols` = 0), or exactly `cols` per row
+    /// at full size (used by the group popup, which sizes itself to fit).
+    fn tile_grid(&self, ui: &mut egui::Ui, ts: f32, cols: usize, items: &[TileItem<'_>], acts: &mut Vec<(String, Act)>) {
         let gap = 10.0;
-        let cols = self.cfg.tile_columns as usize;
         let draw = |ui: &mut egui::Ui, it: &TileItem<'_>, size: f32, acts: &mut Vec<(String, Act)>| match it {
             TileItem::Folder(name) => self.folder_tile(ui, name, size, acts),
             TileItem::App(e) => self.tile(ui, e, size, acts),
@@ -984,13 +1073,16 @@ impl Manager {
                 }
             });
         } else {
-            let fit = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
-            let size = ts.min(fit).max(60.0);
+            // centre the whole block of `cols` tiles horizontally (rows stay left-aligned inside it)
+            let block = cols as f32 * ts + gap * (cols as f32 - 1.0);
+            let pad = ((ui.available_width() - block) / 2.0).max(0.0);
             for row in items.chunks(cols) {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.add_space(pad);
                     ui.spacing_mut().item_spacing.x = gap;
                     for it in row {
-                        draw(ui, it, size, acts);
+                        draw(ui, it, ts, acts);
                     }
                 });
                 ui.add_space(gap);
@@ -1028,6 +1120,10 @@ impl Manager {
                 acts.push((name.to_string(), Act::Group));
                 ui.close_menu();
             }
+            if ui.button("Rename group…").clicked() {
+                acts.push((name.to_string(), Act::RenameGroup));
+                ui.close_menu();
+            }
             if ui.button("Ungroup (move apps out)").clicked() {
                 acts.push((name.to_string(), Act::Ungroup));
                 ui.close_menu();
@@ -1044,18 +1140,24 @@ impl Manager {
         let mut apps: Vec<&AppEntry> = self.in_group(&name).collect();
         apps.sort_by_key(|a| a.name.to_lowercase());
         let items: Vec<TileItem> = apps.into_iter().map(TileItem::App).collect();
-        let ts = self.cfg.tile_size.clamp(90.0, 200.0);
-        let cols = if self.cfg.tile_columns == 0 { 3 } else { self.cfg.tile_columns as usize };
+        let gap = 10.0;
         let screen = ctx.screen_rect();
-        let width = (cols as f32 * (ts + 10.0) + 28.0).min(screen.width() - 40.0);
+        // max icons per row; never more columns than apps, so the window hugs its content
+        let max_cols = if self.cfg.max_per_row == 0 { 3 } else { self.cfg.max_per_row as usize };
+        let cols = max_cols.min(items.len()).max(1);
+        // shrink the icons only if the chosen row would not fit on screen
+        let avail = (screen.width() - 80.0 - gap * (cols as f32 - 1.0)) / cols as f32;
+        let ts = self.cfg.group_tile_size.clamp(90.0, 200.0).min(avail).max(60.0);
+        let width = (cols as f32 * ts + gap * (cols as f32 - 1.0)).max(190.0);
         let mut open = true;
+        // a new id per opening: the window starts fitted to its icons, then stays freely resizable
         egui::Window::new(format!("📁 {name}"))
-            .id(egui::Id::new("group_popup"))
+            .id(egui::Id::new(("group_popup", self.group_gen)))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(width)
-            .default_pos(screen.center() - egui::vec2(width / 2.0, 160.0))
+            .default_width(width + 24.0)
+            .default_pos(screen.center() - egui::vec2(width / 2.0 + 14.0, 160.0))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{} app(s)", items.len())).weak());
@@ -1063,11 +1165,14 @@ impl Manager {
                         if ui.button("Ungroup").on_hover_text("Move these apps out of the group").clicked() {
                             acts.push((name.clone(), Act::Ungroup));
                         }
+                        if ui.button("Rename").on_hover_text("Rename this group").clicked() {
+                            acts.push((name.clone(), Act::RenameGroup));
+                        }
                     });
                 });
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(screen.height() * 0.7).auto_shrink([true, true]).show(ui, |ui| {
-                    self.tile_grid(ui, ts, &items, acts);
+                egui::ScrollArea::both().max_height(screen.height() * 0.7).auto_shrink([true, true]).show(ui, |ui| {
+                    self.tile_grid(ui, ts, cols, &items, acts);
                 });
             });
         if !open {
@@ -1461,11 +1566,12 @@ impl Manager {
             changed |= ui.checkbox(&mut self.cfg.auto_check, "Check for updates on startup").changed();
             ui.separator();
             ui.strong("Tiles & groups");
-            changed |= ui.add(egui::Slider::new(&mut self.cfg.default_tile_size, 90.0..=200.0).text("Default icon size")).changed();
+            changed |= ui.add(egui::Slider::new(&mut self.cfg.default_tile_size, 90.0..=200.0).text("Default icon size (main window)")).changed();
+            changed |= ui.add(egui::Slider::new(&mut self.cfg.group_tile_size, 90.0..=200.0).text("Icon size (group window)")).changed();
             ui.horizontal(|ui| {
-                ui.label("Columns per row");
-                changed |= ui.add(egui::DragValue::new(&mut self.cfg.tile_columns).range(0..=12)).changed();
-                ui.label(RichText::new("0 = as many as fit the window").weak());
+                ui.label("Max icons per row");
+                changed |= ui.add(egui::DragValue::new(&mut self.cfg.max_per_row).range(1..=12)).changed();
+                ui.label(RichText::new("group window; opens sized to fit, still resizable").weak());
             });
             if ui.button("Use the default icon size now").clicked() {
                 self.cfg.tile_size = self.cfg.default_tile_size;
@@ -1713,7 +1819,7 @@ impl eframe::App for Manager {
                     apps.sort_by_key(|a| a.name.to_lowercase());
                     if self.cfg.view == ViewMode::Tiles {
                         let items: Vec<TileItem> = apps.into_iter().map(TileItem::App).collect();
-                        self.tile_grid(ui, ts, &items, &mut acts);
+                        self.tile_grid(ui, ts, 0, &items, &mut acts);
                     } else {
                         for e in apps {
                             self.card(ui, e, &mut acts);
@@ -1775,6 +1881,7 @@ impl eframe::App for Manager {
         for (id, a) in acts {
             self.act(ctx, id, a);
         }
+        self.rename_window(ctx);
 
         self.form_window(ctx);
         self.remove_window(ctx);

@@ -100,6 +100,14 @@ fn default_tile() -> f32 {
     128.0
 }
 
+fn default_group_tile() -> f32 {
+    110.0
+}
+
+fn default_per_row() -> u32 {
+    3
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -116,9 +124,12 @@ pub struct Config {
     /// size used when "remember" is off, or when you press "use default now"
     #[serde(default = "default_tile")]
     pub default_tile_size: f32,
-    /// tiles per row in tile view; 0 = as many as fit the window
-    #[serde(default)]
-    pub tile_columns: u32,
+    /// max icons per row in a group popup window (the window is sized to fit it)
+    #[serde(default = "default_per_row", alias = "tile_columns")]
+    pub max_per_row: u32,
+    /// icon size inside the group popup window (independent of the main window's icon size)
+    #[serde(default = "default_group_tile")]
+    pub group_tile_size: f32,
     /// save window size + icon size when closing, restore them on start
     #[serde(default = "yes")]
     pub remember_window: bool,
@@ -137,7 +148,8 @@ impl Default for Config {
             view: ViewMode::List,
             tile_size: default_tile(),
             default_tile_size: default_tile(),
-            tile_columns: 0,
+            max_per_row: default_per_row(),
+            group_tile_size: default_group_tile(),
             remember_window: true,
             window_size: None,
             window_maximized: false,

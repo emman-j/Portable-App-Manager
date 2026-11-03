@@ -19,7 +19,8 @@ See the [`docs/`](docs/README.md) folder: user guide, sources and matching, buil
 - **Archives**: `.zip`, `.7z`, `.tar.gz` / `.tgz` are extracted (a single top-level folder is flattened). Any other file (exe, AppImage) is copied as-is.
 - **List and tile views** with app icons taken from the selected executable.
 - **Groups** (one level): collapsible folders in list view; in tile view a group opens as a popup window with its tiles. Ungroup with a right-click.
-- **Tile settings**: default icon size, columns per row, and remembered window / icon size (Settings ⚙).
+- **Tile settings**: default icon size, max icons per row in a group window (it resizes to fit), and remembered window / icon size (Settings ⚙).
+- **Rename groups**: right-click a group (list header or folder tile), or use Rename in the group window.
 - **Backup**: export / import your app list to set up another PC (import asks you to confirm you trust the source).
 - **Data folder**: stored next to the exe by default; choose another location in Settings.
 - **Safe removal**: deleting an app's files always asks for confirmation (the box starts unchecked).
