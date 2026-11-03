@@ -108,6 +108,8 @@ enum Kind {
 enum ManualMode {
     Import,
     Link,
+    /// just create an empty app folder; the user installs / copies the app into it
+    Folder,
 }
 
 struct Detected {
@@ -302,6 +304,8 @@ enum Act {
     Import,
     OpenDir,
     Edit,
+    /// look for an executable inside the app folder and select it
+    Detect,
     Remove,
     /// open a folder in tile view (the id slot carries the group path)
     Group,
@@ -520,6 +524,24 @@ impl Manager {
                     self.form = Some(Form::from_entry(e, &self.paths));
                 }
             }
+            Act::Detect => {
+                let Some(e) = self.entry(&id).cloned() else { return };
+                let dir = e.dir(&self.paths);
+                let list = install::find_executables(&dir);
+                match install::pick_default(&e.name, &list) {
+                    Some(x) => {
+                        if let Some(m) = self.cfg.apps.iter_mut().find(|a| a.id == id) {
+                            m.exe = Some(x.clone());
+                        }
+                        self.errors.remove(&id);
+                        self.save();
+                        self.say(format!("Executable set to {x}"));
+                    }
+                    None => {
+                        self.errors.insert(id, format!("No executable found in {} - copy the app there first", dir.display()));
+                    }
+                }
+            }
             Act::Group => self.tile_path = id,
             Act::Remove => {
                 // file deletion is opt-in every time: the box starts unchecked
@@ -562,12 +584,19 @@ impl Manager {
         };
 
         let mut to_install: Option<InstallSrc> = None;
+        let mut new_folder: Option<PathBuf> = None;
         match (&source, f.manual_mode) {
             (Source::Manual, ManualMode::Link) => {
                 let p = f.manual_file.as_ref().ok_or("Pick the executable to link")?;
                 entry.managed = false;
                 entry.exe = Some(p.to_string_lossy().to_string());
                 entry.version = Some("external".into());
+            }
+            (Source::Manual, ManualMode::Folder) => {
+                let d = entry.dir(&self.paths);
+                fs::create_dir_all(&d).map_err(|e| format!("Cannot create folder: {e}"))?;
+                entry.version = Some("manual".into());
+                new_folder = Some(d);
             }
             (Source::Manual, ManualMode::Import) => {
                 let p = f.manual_file.clone().ok_or("Pick the file you downloaded")?;
@@ -579,6 +608,13 @@ impl Manager {
         self.save();
         if let Some(src) = to_install {
             self.start_install(ctx, &id, src);
+        }
+        if let Some(d) = new_folder {
+            let _ = open::that(&d);
+            self.say(format!(
+                "Folder created: {} - put the app in it, then use ⋮ → Detect executable (or Edit) to pick the exe",
+                d.display()
+            ));
         }
         Ok(())
     }
@@ -787,6 +823,9 @@ impl Manager {
         if e.managed && ui.button("Open folder").clicked() {
             push(ui, Act::OpenDir);
         }
+        if e.managed && ui.button("Detect executable").clicked() {
+            push(ui, Act::Detect);
+        }
         if ui.button("Edit… (name, group, exe)").clicked() {
             push(ui, Act::Edit);
         }
@@ -932,6 +971,8 @@ impl Manager {
                 acts.push((e.id.clone(), Act::Launch));
             } else if !installed && e.managed {
                 acts.push((e.id.clone(), if manual { Act::Import } else { Act::Update }));
+            } else if e.managed {
+                acts.push((e.id.clone(), Act::Detect));
             }
         }
         resp.context_menu(|ui| self.menu_items(ui, e, acts, true));
@@ -973,6 +1014,12 @@ impl Manager {
                         let b = egui::Button::new(RichText::new(label).strong()).fill(Color32::from_rgb(30, 100, 60));
                         if ui.add_enabled(busy.is_none(), b).clicked() {
                             acts.push((id.clone(), if manual { Act::Import } else { Act::Update }));
+                        }
+                    }
+                    if installed && e.exe.is_none() && e.managed && busy.is_none() {
+                        let b = ui.button("🔍 Detect exe").on_hover_text("Find the executable inside this app's folder");
+                        if b.clicked() {
+                            acts.push((id.clone(), Act::Detect));
                         }
                     }
                     let can_launch = busy.is_none() && e.exe.is_some();
@@ -1104,8 +1151,14 @@ impl Manager {
                                 ui.vertical(|ui| {
                                     ui.radio_value(&mut f.manual_mode, ManualMode::Import, "Import a file I downloaded (zip / 7z / tar.gz / exe)");
                                     ui.radio_value(&mut f.manual_mode, ManualMode::Link, "Link an existing program (stays where it is)");
+                                    ui.radio_value(&mut f.manual_mode, ManualMode::Folder, "Just create an empty folder (I'll install the app into it)");
                                 });
                                 ui.end_row();
+                                if f.manual_mode == ManualMode::Folder {
+                                    ui.label("");
+                                    ui.label(RichText::new("An empty folder is created inside pam-data/apps and opened. Install or copy the portable app into it, then use ⋮ → Detect executable (or Edit) to select the exe.").weak());
+                                    ui.end_row();
+                                } else {
                                 ui.label("File");
                                 ui.horizontal(|ui| {
                                     if ui.button("Browse…").clicked() {
@@ -1121,6 +1174,7 @@ impl Manager {
                                     ui.label(f.manual_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "nothing selected".into()));
                                 });
                                 ui.end_row();
+                                }
                             }
                         }
                     }
@@ -1155,7 +1209,13 @@ impl Manager {
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
-                    let label = if f.editing.is_some() { "Save" } else { "Add & install" };
+                    let label = if f.editing.is_some() {
+                        "Save"
+                    } else if f.kind == Kind::Manual && f.manual_mode == ManualMode::Folder {
+                        "Create folder"
+                    } else {
+                        "Add & install"
+                    };
                     if ui.button(RichText::new(label).strong()).clicked() {
                         submit = true;
                     }
@@ -1269,7 +1329,8 @@ impl eframe::App for Manager {
         let mut view_changed = false;
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            // row 1: title + actions (wraps when the window is narrow)
+            ui.horizontal_wrapped(|ui| {
                 ui.heading("Portable App Manager");
                 ui.separator();
                 add = ui.button("➕ Add app").clicked();
@@ -1288,17 +1349,19 @@ impl eframe::App for Manager {
                 if ui.button("⚙").on_hover_text("Settings").clicked() {
                     self.show_settings = !self.show_settings;
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("🔍 filter").desired_width(160.0));
-                    ui.separator();
-                    // right-to-left: first added = rightmost, so this reads  [List][Tiles]  left→right
-                    view_changed |= ui.selectable_value(&mut self.cfg.view, ViewMode::Tiles, "▦ Tiles").clicked();
-                    view_changed |= ui.selectable_value(&mut self.cfg.view, ViewMode::List, "☰ List").clicked();
-                    if self.cfg.view == ViewMode::Tiles {
-                        let r = ui.add(egui::Slider::new(&mut self.cfg.tile_size, 90.0..=200.0).show_value(false));
-                        view_changed |= r.drag_stopped();
-                    }
-                });
+            });
+            ui.add_space(2.0);
+            // row 2: filter + view options
+            ui.horizontal_wrapped(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("🔍 filter").desired_width(200.0));
+                ui.separator();
+                view_changed |= ui.selectable_value(&mut self.cfg.view, ViewMode::List, "☰ List").clicked();
+                view_changed |= ui.selectable_value(&mut self.cfg.view, ViewMode::Tiles, "▦ Tiles").clicked();
+                if self.cfg.view == ViewMode::Tiles {
+                    ui.label("Size");
+                    let r = ui.add(egui::Slider::new(&mut self.cfg.tile_size, 90.0..=200.0).show_value(false));
+                    view_changed |= r.drag_stopped();
+                }
             });
             ui.add_space(4.0);
         });
@@ -1398,14 +1461,28 @@ impl eframe::App for Manager {
     }
 }
 
+/// Normalised 256x256 version of src/icon/icon.png, produced by build.rs. Replace the source file and rebuild to change the icon.
+const ICON_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon256.png"));
+
+fn window_icon() -> Option<egui::IconData> {
+    let mut img = image::load_from_memory(ICON_PNG).ok()?;
+    if img.width() > 256 || img.height() > 256 {
+        img = img.resize(256, 256, image::imageops::FilterType::Triangle);
+    }
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some(egui::IconData { rgba: rgba.into_raw(), width, height })
+}
+
 fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([860.0, 580.0])
-            .with_min_inner_size([620.0, 380.0])
-            .with_title("Portable App Manager"),
-        ..Default::default()
-    };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([860.0, 580.0])
+        .with_min_inner_size([620.0, 380.0])
+        .with_title("Portable App Manager");
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "Portable App Manager",
         options,
