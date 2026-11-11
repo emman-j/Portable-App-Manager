@@ -381,6 +381,28 @@ struct Manager {
     win_maxi: bool,
 }
 
+/// egui's built-in fonts lack some symbols (⇅ ▦ ⋮ show up as empty boxes). Add a system symbol font as a fallback.
+fn setup_fonts(ctx: &egui::Context) {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let win = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Windows"));
+    candidates.push(win.join("Fonts").join("seguisym.ttf"));
+    for p in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    ] {
+        candidates.push(PathBuf::from(p));
+    }
+    let Some(bytes) = candidates.iter().find_map(|p| fs::read(p).ok()) else { return };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert("symbols".into(), egui::FontData::from_owned(bytes));
+    for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts.families.entry(fam).or_default().push("symbols".into());
+    }
+    ctx.set_fonts(fonts);
+}
+
 fn truncate(s: &str, max: usize) -> String {
     let max = max.max(4);
     if s.chars().count() <= max {
@@ -398,6 +420,7 @@ enum TileItem<'a> {
 
 impl Manager {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        setup_fonts(&cc.egui_ctx);
         let paths = Paths::detect();
         let cfg = Config::load(&paths);
         let (tx, rx) = channel();
@@ -1295,7 +1318,8 @@ impl Manager {
             .collapsible(false)
             .resizable(true)
             .default_width(width + 36.0)
-            .default_pos(screen.center() - egui::vec2(width / 2.0 + 14.0, 160.0))
+            .default_pos(screen.center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{} app(s)", items.len())).weak());
