@@ -7,6 +7,7 @@ Everything lives in a `pam-data` folder next to the exe by default. You can move
 pam-data/
 ├─ config.json     your app list and settings
 ├─ apps/<id>/      the files of each managed app
+├─ icons/<id>.png  custom icons you picked
 └─ tmp/            downloads in progress
 ```
 Copying the whole `pam-data` folder to another PC carries your apps, their files and their own settings.
@@ -19,7 +20,7 @@ Click **➕ Add app** and paste into the top box. The type is detected for you; 
 | GitHub release | `owner/repo`, the repo URL, or a release download link | Tracks the latest release |
 | Direct link | A URL to a file | Update detection via ETag, Last-Modified or size |
 | Download page | A web page that links to downloads | Links are scraped from the page |
-| Manual | nothing to paste | You provide the files yourself |
+| Manual | nothing to paste | You provide the files yourself (or link a program that stays where it is) |
 
 Then set:
 - **Name**: shown in the list.
@@ -32,15 +33,15 @@ Press **Add & install**. The app is downloaded, extracted into `pam-data/apps/<i
 ### Manual apps
 Under the **Manual** type you can choose:
 - **Import a file I downloaded**: pick a `.zip`, `.7z`, `.tar.gz`, exe or AppImage. It is installed like a download.
-- **Link an existing program**: pick an exe that stays where it is. Removing it never deletes its files.
+- **Link an existing program**: pick an exe that stays where it is. These apps are labelled **Link** and show the path they point to. Removing one never deletes its files.
 - **Just create an empty folder**: for portable apps you install yourself. The folder opens; put the app in it, then use **⋮ → Detect executable** (or Edit) to pick the exe.
 
 ## Launching, updating, removing
 - **▶ Launch** starts the selected exe with its folder as the working directory.
 - **🔄 Check all** looks for updates for every app. A green **⬆ Update** button (or green dot in tile view) means a newer version exists.
 - **⬇ Install / update all** installs apps that are not installed yet and updates those with a newer version.
-- **⋮ menu** (right-click in tile view): Check for update, Reinstall latest, Install from downloaded file, Open folder, Detect executable, Edit, Remove.
-- **Edit** changes the name, source, group, launch args and the executable (pick from the detected list or browse).
+- **⋮ menu** (right-click in tile view): Check for update, Reinstall latest, Install from downloaded file, Open folder, Detect executable, Edit, Set icon, Reset icon (only with a custom icon), Remove.
+- **Edit** changes the name, source, group, icon, launch args and the executable (pick from the detected list or browse).
 - **Remove** asks first. The **Also delete its files** box always starts unchecked; a red warning shows the folder that would be deleted. Linked programs are never deleted.
 
 Updates are extracted over the existing folder, so settings a portable app stores inside its folder survive.
@@ -51,17 +52,21 @@ Updates are extracted over the existing folder, so settings a portable app store
 - The **filter** box searches by name and shows a flat result list in either view.
 
 ### Icons
-The icon is read from the selected executable. If it has none, an icon file near the exe is used (`icon.png`, `<name>.png`, `.DirIcon`, `.ico`), otherwise a coloured tile with the first letter.
+By default the icon is read from the selected executable. If it has none, an icon file near the exe is used (`icon.png`, `<name>.png`, `.DirIcon`, `.ico`), otherwise a coloured tile with the first letter.
+
+**Your own icon:** right-click an app (or use **⋮**) and choose **Set icon…**, or use the **Icon** row in Add / Edit. Pick an image (`.png`, `.jpg`, `.bmp`, `.ico`) or an `.exe` / `.dll` to take its icon. It is converted to a small PNG and copied into `pam-data/icons/`, so it keeps working if the original file moves. **Reset icon** (or **Automatic** in Edit) goes back to the automatic icon. Custom icons are removed with the app and are not part of **Export app list**.
 
 ## Groups
 Give an app a **Group** such as `Games`. Groups are **one level only** (no groups inside groups); a name with `/` is flattened (`Games/Emulators` becomes `Games - Emulators`).
 - **List view**: collapsible folders with an app count; ungrouped apps are listed after them.
 - **Tile view**: a group is a folder tile with a 2×2 icon preview. Click it and the group opens in a **floating window** with the group name as its title and the app tiles inside, like a Start-menu folder. Drag the window around, resize it, or close it with ✕ (click the folder tile again to close it too). Launching an app from it closes the window.
 - **Ungroup**: right-click a group header (list view) or a folder tile (tile view), or press **Ungroup** in the group window. The apps become ungrouped; nothing is deleted.
-- A group exists only while an app is in it. To rename a group, change the Group field of its apps.
+- **Rename**: right-click a group header (list view) or a folder tile (tile view) and choose **Rename group…**, or press **Rename** in the group window. If the new name already exists, the two groups are merged.
+- **Max icons per row** (Settings) sets how many icons the group window shows per row; it opens sized to fit and can still be resized. The group window has its own icon size.
+- A group exists only while an app is in it.
 
 ## Backup and moving to another PC
-**⇅ Backup → Export app list…** writes a JSON file with each app's name, source, package name, group, launch args and executable. It contains no downloaded files and no GitHub token.
+**⇅ Backup → Export app list…** writes a JSON file with each app's name, source, package name, group, launch args and executable. It contains no downloaded files, no custom icons and no GitHub token.
 
 On the other PC: **⇅ Backup → Import app list…**, then **⬇ Install / update all**.
 
@@ -72,7 +77,7 @@ On the other PC: **⇅ Backup → Import app list…**, then **⬇ Install / upd
 ## Settings (⚙)
 - **GitHub token** (optional): raises the GitHub API rate limit. Stored in `config.json` in plain text.
 - **Check for updates on startup**.
-- **Tiles & groups**: the default icon size and the number of columns per row in tile view (0 = as many as fit the window; with a fixed number, tiles shrink if the window is too narrow).
+- **Tiles & groups**: the default icon size (main window), the icon size used in the group window, and **Max icons per row** for the group window (the window opens sized to fit it, and tiles shrink only if the row would not fit on screen). The main tile view always fits as many tiles per row as the window allows.
 - **Window**: *Remember window size and icon size when closing* saves them on exit and restores them on the next start. *Use the default icon size now* and *Forget saved window size* reset them.
 - **Data folder**: shows where your data lives and lets you change it. When you switch, you can copy your apps and settings to the new place (the old folder is left untouched). Not available while `PAM_DATA` is set.
 - Shows the version.

@@ -6,7 +6,7 @@
 | GitHub release | the release tag (`tag_name`) | the tag stored at install |
 | Direct link | `etag:<value>`, else the `Last-Modified` header, else `size:<bytes>` | the value stored at install |
 | Download page | the version regex match; else a version found in the file name; else the file name | the value stored at install |
-| Manual | none | no update checks |
+| Manual / Link | none | no update checks (a linked program's version is read from its exe) |
 
 An update is shown when the latest value differs from the stored one. If a direct link yields no usable header the version is `?` and is never flagged as an update.
 
