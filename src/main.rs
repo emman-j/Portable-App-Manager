@@ -8,7 +8,7 @@ mod util;
 mod version;
 
 use eframe::egui::{self, Color32, RichText};
-use model::{AppEntry, Config, Paths, Source, ViewMode};
+use model::{AppEntry, Config, Paths, Source, Theme, ViewMode};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs,
@@ -375,6 +375,8 @@ struct Manager {
     icon_pending: HashSet<String>,
     /// bumped whenever a custom icon is set / reset, so cached icons are reloaded
     icon_rev: u32,
+    /// theme / font size changed: re-apply them to egui at the start of the next frame
+    style_dirty: bool,
     last_win: Option<[f32; 2]>,
     win_maxi: bool,
 }
@@ -421,6 +423,7 @@ impl Manager {
             icons: HashMap::new(),
             icon_pending: HashSet::new(),
             icon_rev: 0,
+            style_dirty: true,
             last_win: None,
             win_maxi: false,
         };
@@ -431,6 +434,23 @@ impl Manager {
             m.check_all(&cc.egui_ctx);
         }
         m
+    }
+
+    /// Apply the theme and font size from the settings.
+    fn apply_style(&self, ctx: &egui::Context) {
+        ctx.set_theme(match self.cfg.theme {
+            Theme::System => egui::ThemePreference::System,
+            Theme::Dark => egui::ThemePreference::Dark,
+            Theme::Light => egui::ThemePreference::Light,
+        });
+        let sc = self.cfg.font_scale.clamp(0.8, 1.5);
+        let base = egui::Style::default().text_styles;
+        ctx.all_styles_mut(|s| {
+            s.text_styles = base
+                .iter()
+                .map(|(k, v)| (k.clone(), egui::FontId::new(v.size * sc, v.family.clone())))
+                .collect();
+        });
     }
 
     fn save(&mut self) {
@@ -913,6 +933,7 @@ impl Manager {
         self.errors.clear();
         self.icons.clear();
         self.icon_pending.clear();
+        self.style_dirty = true;
         self.open_group = None;
         self.say(format!("Data folder is now {} (the old folder was left in place)", self.paths.root.display()));
     }
@@ -1228,9 +1249,10 @@ impl Manager {
             self.paint_icon(p, r, a);
         }
         let y = rect.top() + ts * 0.1 + area + 14.0;
-        let max = ((ts - 10.0) / 7.0) as usize;
-        p.text(egui::pos2(rect.center().x, y), egui::Align2::CENTER_TOP, truncate(name, max), egui::FontId::proportional(13.0), txt);
-        p.text(egui::pos2(rect.center().x, y + 17.0), egui::Align2::CENTER_TOP, format!("{} apps", members.len()), egui::FontId::proportional(11.0), weak);
+        let sc = self.cfg.font_scale;
+        let max = ((ts - 10.0) / (7.0 * sc)) as usize;
+        p.text(egui::pos2(rect.center().x, y), egui::Align2::CENTER_TOP, truncate(name, max), egui::FontId::proportional(13.0 * sc), txt);
+        p.text(egui::pos2(rect.center().x, y + 17.0 * sc), egui::Align2::CENTER_TOP, format!("{} apps", members.len()), egui::FontId::proportional(11.0 * sc), weak);
         resp.context_menu(|ui| {
             if ui.button("Open").clicked() {
                 acts.push((name.to_string(), Act::Group));
@@ -1272,7 +1294,7 @@ impl Manager {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(width + 24.0)
+            .default_width(width + 36.0)
             .default_pos(screen.center() - egui::vec2(width / 2.0 + 14.0, 160.0))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -1287,7 +1309,7 @@ impl Manager {
                     });
                 });
                 ui.separator();
-                egui::ScrollArea::both().max_height(screen.height() * 0.7).auto_shrink([true, true]).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(screen.height() * 0.7).auto_shrink([true, true]).show(ui, |ui| {
                     self.tile_grid(ui, ts, cols, &items, acts);
                 });
             });
@@ -1315,15 +1337,16 @@ impl Manager {
         let irect = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + ts * 0.12 + isz / 2.0), egui::vec2(isz, isz));
         self.paint_icon(p, irect, e);
 
-        let max = ((ts - 10.0) / 7.0) as usize;
+        let sc = self.cfg.font_scale;
+        let max = ((ts - 10.0) / (7.0 * sc)) as usize;
         let y = irect.bottom() + 8.0;
-        p.text(egui::pos2(rect.center().x, y), egui::Align2::CENTER_TOP, truncate(&e.name, max), egui::FontId::proportional(13.0), txt);
+        p.text(egui::pos2(rect.center().x, y), egui::Align2::CENTER_TOP, truncate(&e.name, max), egui::FontId::proportional(13.0 * sc), txt);
         let status = match (busy, &e.version) {
             (Some((t, _)), _) => t.clone(),
             (None, Some(v)) => v.clone(),
             (None, None) => "Not installed".into(),
         };
-        p.text(egui::pos2(rect.center().x, y + 17.0), egui::Align2::CENTER_TOP, truncate(&status, max), egui::FontId::proportional(11.0), weak);
+        p.text(egui::pos2(rect.center().x, y + 17.0 * sc), egui::Align2::CENTER_TOP, truncate(&status, max), egui::FontId::proportional(11.0 * sc), weak);
 
         if has_update {
             p.circle_filled(rect.right_top() + egui::vec2(-12.0, 12.0), 5.0, Color32::LIGHT_GREEN);
@@ -1331,7 +1354,7 @@ impl Manager {
             p.circle_filled(rect.right_top() + egui::vec2(-12.0, 12.0), 5.0, Color32::YELLOW);
         }
         if err.is_some() {
-            p.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, "⚠", egui::FontId::proportional(13.0), Color32::LIGHT_RED);
+            p.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, "⚠", egui::FontId::proportional(13.0 * sc), Color32::LIGHT_RED);
         }
         if let Some((_, frac)) = busy {
             let bar = egui::Rect::from_min_size(egui::pos2(rect.left() + 8.0, rect.bottom() - 10.0), egui::vec2(rect.width() - 16.0, 4.0));
@@ -1704,10 +1727,46 @@ impl Manager {
         let mut open = true;
         let mut changed = false;
         let (mut change_loc, mut reset_loc) = (false, false);
-        egui::Window::new("Settings").open(&mut open).collapsible(false).show(ctx, |ui| {
+        let mut style_changed = false;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .default_pos(ctx.screen_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
+            .show(ctx, |ui| {
             ui.label("GitHub token (optional – raises the API rate limit):");
             changed |= ui.add(egui::TextEdit::singleline(&mut self.cfg.github_token).password(true).desired_width(300.0)).changed();
             changed |= ui.checkbox(&mut self.cfg.auto_check, "Check for updates on startup").changed();
+            ui.separator();
+            ui.strong("Appearance");
+            ui.horizontal(|ui| {
+                ui.label("Theme");
+                for (t, l) in [(Theme::System, "System"), (Theme::Dark, "Dark"), (Theme::Light, "Light")] {
+                    if ui.selectable_value(&mut self.cfg.theme, t, l).clicked() {
+                        changed = true;
+                        style_changed = true;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                let r = ui.add(
+                    egui::Slider::new(&mut self.cfg.font_scale, 0.8..=1.5)
+                        .text("Font size")
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                );
+                if r.changed() {
+                    changed = true;
+                }
+                // apply when the drag ends, so the window doesn't resize under the cursor
+                if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                    style_changed = true;
+                }
+                if ui.small_button("100%").on_hover_text("Reset font size").clicked() {
+                    self.cfg.font_scale = 1.0;
+                    changed = true;
+                    style_changed = true;
+                }
+            });
             ui.separator();
             ui.strong("Tiles & groups");
             changed |= ui.add(egui::Slider::new(&mut self.cfg.default_tile_size, 90.0..=200.0).text("Default icon size (main window)")).changed();
@@ -1755,6 +1814,9 @@ impl Manager {
                 });
             }
         });
+        if style_changed {
+            self.style_dirty = true;
+        }
         if changed {
             self.save();
         }
@@ -1876,6 +1938,10 @@ impl eframe::App for Manager {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.style_dirty {
+            self.apply_style(ctx);
+            self.style_dirty = false;
+        }
         self.poll(ctx);
         self.ensure_icons(ctx);
         // remember the (non-maximized) window size so it can be saved on exit

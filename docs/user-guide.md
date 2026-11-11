@@ -77,6 +77,7 @@ On the other PC: **⇅ Backup → Import app list…**, then **⬇ Install / upd
 ## Settings (⚙)
 - **GitHub token** (optional): raises the GitHub API rate limit. Stored in `config.json` in plain text.
 - **Check for updates on startup**.
+- **Appearance**: **Theme** (System, Dark or Light) and **Font size** (80%–150%; the 100% button resets it). The font size is applied when you release the slider.
 - **Tiles & groups**: the default icon size (main window), the icon size used in the group window, and **Max icons per row** for the group window (the window opens sized to fit it, and tiles shrink only if the row would not fit on screen). The main tile view always fits as many tiles per row as the window allows.
 - **Window**: *Remember window size and icon size when closing* saves them on exit and restores them on the next start. *Use the default icon size now* and *Forget saved window size* reset them.
 - **Data folder**: shows where your data lives and lets you change it. When you switch, you can copy your apps and settings to the new place (the old folder is left untouched). Not available while `PAM_DATA` is set.

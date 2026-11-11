@@ -120,6 +120,19 @@ pub enum ViewMode {
     Tiles,
 }
 
+/// Colour theme: follow the OS, or force dark / light.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+pub enum Theme {
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+fn default_scale() -> f32 {
+    1.0
+}
+
 fn default_tile() -> f32 {
     128.0
 }
@@ -161,6 +174,11 @@ pub struct Config {
     pub window_size: Option<[f32; 2]>,
     #[serde(default)]
     pub window_maximized: bool,
+    #[serde(default)]
+    pub theme: Theme,
+    /// text size multiplier (1.0 = normal)
+    #[serde(default = "default_scale")]
+    pub font_scale: f32,
 }
 
 impl Default for Config {
@@ -177,6 +195,8 @@ impl Default for Config {
             remember_window: true,
             window_size: None,
             window_maximized: false,
+            theme: Theme::System,
+            font_scale: 1.0,
         }
     }
 }
