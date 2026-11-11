@@ -98,3 +98,38 @@ fn scan(dir: &Path, depth: usize, stem: &str, best: &mut Option<(i32, PathBuf)>)
         }
     }
 }
+
+/// Load a custom icon previously saved by `import_custom` (a PNG in the data folder).
+pub fn load_custom(path: &Path) -> Option<ColorImage> {
+    decode(&fs::read(path).ok()?)
+}
+
+/// Turn a picked image (png / jpg / bmp / ico) or the icon inside an exe / dll into a PNG (max 256 px) at `dest`.
+pub fn import_custom(src: &Path, dest: &Path) -> Result<(), String> {
+    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let mut img = if ext == "exe" || ext == "dll" {
+        let ico = from_pe(src).ok_or("No icon found inside that program")?;
+        image::load_from_memory(&ico).map_err(|e| format!("Unreadable icon: {e}"))?
+    } else {
+        let len = fs::metadata(src).map_err(|e| e.to_string())?.len();
+        if len > 10_000_000 {
+            return Err("That file is too big for an icon (max 10 MB)".into());
+        }
+        let (w, h) = image::ImageReader::open(src)
+            .and_then(|r| r.with_guessed_format())
+            .map_err(|e| e.to_string())?
+            .into_dimensions()
+            .map_err(|e| format!("Not a supported image: {e}"))?;
+        if w > 8192 || h > 8192 {
+            return Err("That image is too large (max 8192 x 8192)".into());
+        }
+        image::open(src).map_err(|e| format!("Not a supported image: {e}"))?
+    };
+    if img.width() > 256 || img.height() > 256 {
+        img = img.resize(256, 256, image::imageops::FilterType::Triangle);
+    }
+    if let Some(p) = dest.parent() {
+        fs::create_dir_all(p).map_err(|e| e.to_string())?;
+    }
+    img.save_with_format(dest, image::ImageFormat::Png).map_err(|e| format!("Could not save icon: {e}"))
+}

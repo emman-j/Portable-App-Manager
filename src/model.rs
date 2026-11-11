@@ -75,9 +75,33 @@ pub struct AppEntry {
     /// Folder path, "/" separated for nesting, e.g. "Games/Emulators". Empty = top level.
     #[serde(default)]
     pub group: String,
+    /// true = the user picked their own icon; it is stored as `<data>/icons/<id>.png`
+    #[serde(default)]
+    pub custom_icon: bool,
 }
 
 impl AppEntry {
+    /// A program that is only linked (not copied into the data folder).
+    pub fn is_link(&self) -> bool {
+        matches!(self.source, Source::Manual) && !self.managed
+    }
+    /// Short badge text: "Link" for linked programs, otherwise the source type.
+    pub fn kind_label(&self) -> &'static str {
+        if self.is_link() { "Link" } else { self.source.label() }
+    }
+    pub fn describe(&self) -> String {
+        if self.is_link() {
+            match &self.exe {
+                Some(e) => format!("linked: {e}"),
+                None => "linked program (no exe selected)".into(),
+            }
+        } else {
+            self.source.describe()
+        }
+    }
+    pub fn icon_path(&self, paths: &Paths) -> PathBuf {
+        paths.icons().join(format!("{}.png", crate::util::slug(&self.id)))
+    }
     pub fn dir(&self, paths: &Paths) -> PathBuf {
         // slug() makes sure an id can never point outside the apps folder (no "..", no absolute paths)
         paths.apps().join(crate::util::slug(&self.id))
@@ -227,6 +251,9 @@ impl Paths {
     }
     pub fn apps(&self) -> PathBuf {
         self.root.join("apps")
+    }
+    pub fn icons(&self) -> PathBuf {
+        self.root.join("icons")
     }
     pub fn tmp(&self) -> PathBuf {
         self.root.join("tmp")

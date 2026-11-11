@@ -200,6 +200,11 @@ struct Form {
     exes: Vec<String>,
     args: String,
     group: String,
+    /// newly picked icon image (applied on save)
+    icon_src: Option<PathBuf>,
+    /// go back to the automatic icon on save
+    icon_clear: bool,
+    had_icon: bool,
     error: String,
 }
 
@@ -223,6 +228,9 @@ impl Form {
             exes: vec![],
             args: String::new(),
             group: String::new(),
+            icon_src: None,
+            icon_clear: false,
+            had_icon: false,
             error: String::new(),
         }
     }
@@ -234,6 +242,10 @@ impl Form {
         f.locked = true;
         f.args = e.args.clone();
         f.group = e.group.clone();
+        f.had_icon = e.custom_icon;
+        if e.is_link() {
+            f.manual_mode = ManualMode::Link;
+        }
         f.exe = e.exe.clone().unwrap_or_default();
         f.exes = install::find_executables(&e.dir(paths));
         match &e.source {
@@ -324,6 +336,10 @@ enum Act {
     Edit,
     /// look for an executable inside the app folder and select it
     Detect,
+    /// pick a custom icon image for the app
+    SetIcon,
+    /// go back to the automatic icon
+    ResetIcon,
     /// dissolve a group (the id slot carries the group path)
     Ungroup,
     /// rename a group (the id slot carries the group name)
@@ -357,6 +373,8 @@ struct Manager {
     moving: bool,
     icons: HashMap<String, IconSlot>,
     icon_pending: HashSet<String>,
+    /// bumped whenever a custom icon is set / reset, so cached icons are reloaded
+    icon_rev: u32,
     last_win: Option<[f32; 2]>,
     win_maxi: bool,
 }
@@ -402,6 +420,7 @@ impl Manager {
             moving: false,
             icons: HashMap::new(),
             icon_pending: HashSet::new(),
+            icon_rev: 0,
             last_win: None,
             win_maxi: false,
         };
@@ -618,6 +637,22 @@ impl Manager {
                     }
                 }
             }
+            Act::SetIcon => {
+                if let Some(p) = rfd::FileDialog::new()
+                    .set_title("Pick an icon (png / jpg / bmp / ico, or an exe / dll to take its icon)")
+                    .add_filter("Images and programs", &["png", "jpg", "jpeg", "bmp", "ico", "exe", "dll"])
+                    .pick_file()
+                {
+                    match self.apply_icon(&id, &p) {
+                        Ok(()) => self.say("Icon changed"),
+                        Err(e) => self.say(format!("Could not use that icon: {e}")),
+                    }
+                }
+            }
+            Act::ResetIcon => {
+                self.clear_icon(&id);
+                self.say("Icon reset to automatic");
+            }
             Act::Ungroup => self.ungroup(&id),
             Act::RenameGroup => self.rename = Some((id.clone(), id)),
             Act::Group => {
@@ -634,6 +669,30 @@ impl Manager {
                 self.remove = Some((id, false));
             }
         }
+    }
+
+    /// Save `src` as the app's own icon (converted to a small PNG inside the data folder).
+    fn apply_icon(&mut self, id: &str, src: &std::path::Path) -> Result<(), String> {
+        let Some(e) = self.entry(id) else { return Err("App not found".into()) };
+        let dest = e.icon_path(&self.paths);
+        icons::import_custom(src, &dest)?;
+        if let Some(e) = self.cfg.apps.iter_mut().find(|a| a.id == id) {
+            e.custom_icon = true;
+        }
+        self.icon_rev = self.icon_rev.wrapping_add(1);
+        self.save();
+        Ok(())
+    }
+
+    fn clear_icon(&mut self, id: &str) {
+        if let Some(e) = self.entry(id) {
+            let _ = fs::remove_file(e.icon_path(&self.paths));
+        }
+        if let Some(e) = self.cfg.apps.iter_mut().find(|a| a.id == id) {
+            e.custom_icon = false;
+        }
+        self.icon_rev = self.icon_rev.wrapping_add(1);
+        self.save();
     }
 
     fn submit_form(&mut self, ctx: &egui::Context, f: &Form) -> Result<(), String> {
@@ -653,6 +712,14 @@ impl Manager {
             }
             self.latest.remove(id);
             self.save();
+            if f.icon_clear {
+                self.clear_icon(id);
+            }
+            if let Some(p) = &f.icon_src {
+                if let Err(e) = self.apply_icon(id, p) {
+                    self.say(format!("Saved, but the icon could not be used: {e}"));
+                }
+            }
             return Ok(());
         }
 
@@ -667,6 +734,7 @@ impl Manager {
             args: f.args.trim().into(),
             managed: true,
             group: util::norm_group(&f.group),
+            custom_icon: false,
         };
 
         let mut to_install: Option<InstallSrc> = None;
@@ -692,6 +760,11 @@ impl Manager {
         }
         self.cfg.apps.push(entry);
         self.save();
+        if let Some(p) = &f.icon_src {
+            if let Err(e) = self.apply_icon(&id, p) {
+                self.say(format!("App added, but the icon could not be used: {e}"));
+            }
+        }
         if let Some(src) = to_install {
             self.start_install(ctx, &id, src);
         }
@@ -725,6 +798,7 @@ impl Manager {
                 if a.managed {
                     a.version = None; // will be (re)installed on the other PC
                 }
+                a.custom_icon = false; // icon files are not part of the export
                 a
             })
             .collect();
@@ -788,6 +862,7 @@ impl Manager {
                     relink += 1;
                 }
                 a.group = util::norm_group(&a.group);
+                a.custom_icon = false; // never trust an icon flag from a file
                 self.cfg.apps.push(a);
                 added += 1;
             }
@@ -862,22 +937,28 @@ impl Manager {
         for a in &self.cfg.apps {
             let exe = a.exe_path(&self.paths);
             let key = format!(
-                "{}|{}",
+                "{}|{}|{}|{}",
                 exe.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-                a.version.clone().unwrap_or_default()
+                a.version.clone().unwrap_or_default(),
+                a.custom_icon,
+                self.icon_rev
             );
             let fresh = self.icons.get(&a.id).map(|s| s.key == key).unwrap_or(false);
             if fresh || self.icon_pending.contains(&a.id) {
                 continue;
             }
-            let Some(exe) = exe else {
+            let custom = a.custom_icon.then(|| a.icon_path(&self.paths));
+            if exe.is_none() && custom.is_none() {
                 self.icons.insert(a.id.clone(), IconSlot { key, tex: None });
                 continue;
-            };
+            }
             self.icon_pending.insert(a.id.clone());
             let (tx, ctx, id, dir) = (self.tx.clone(), ctx.clone(), a.id.clone(), a.dir(&self.paths));
             thread::spawn(move || {
-                let img = icons::load(&exe, &dir);
+                // the user's own icon wins; if it can't be read, fall back to the automatic one
+                let img = custom
+                    .and_then(|p| icons::load_custom(&p))
+                    .or_else(|| exe.and_then(|x| icons::load(&x, &dir)));
                 let _ = tx.send(Msg::Icon { id, key, img });
                 ctx.request_repaint();
             });
@@ -946,6 +1027,12 @@ impl Manager {
         }
         if ui.button("Edit… (name, group, exe)").clicked() {
             push(ui, Act::Edit);
+        }
+        if ui.button("Set icon…").clicked() {
+            push(ui, Act::SetIcon);
+        }
+        if e.custom_icon && ui.button("Reset icon").clicked() {
+            push(ui, Act::ResetIcon);
         }
         ui.separator();
         if ui.button(RichText::new("Remove…").color(Color32::LIGHT_RED)).clicked() {
@@ -1265,7 +1352,7 @@ impl Manager {
         }
         resp.context_menu(|ui| self.menu_items(ui, e, acts, true));
 
-        let mut tip = format!("{}\n{}", e.name, e.source.describe());
+        let mut tip = format!("{}\n{}", e.name, e.describe());
         if has_update {
             if let Some(r) = self.latest.get(&e.id) {
                 tip.push_str(&format!("\nUpdate available: {}", r.version));
@@ -1291,7 +1378,7 @@ impl Manager {
             ui.horizontal(|ui| {
                 self.icon(ui, e, 32.0);
                 ui.label(RichText::new(&e.name).heading());
-                ui.label(RichText::new(e.source.label()).small().weak());
+                ui.label(RichText::new(e.kind_label()).small().weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("⋮", |ui| {
                         self.menu_items(ui, e, acts, false);
@@ -1330,7 +1417,7 @@ impl Manager {
                     }
                 }
             });
-            ui.label(RichText::new(e.source.describe()).small().weak());
+            ui.label(RichText::new(e.describe()).small().weak());
 
             if let Some((text, frac)) = busy {
                 ui.horizontal(|ui| {
@@ -1377,7 +1464,8 @@ impl Manager {
 
                 ui.horizontal(|ui| {
                     ui.label("Type:");
-                    for (k, l) in [(Kind::GitHub, "GitHub release"), (Kind::Direct, "Direct link"), (Kind::Site, "Download page"), (Kind::Manual, "Manual")] {
+                    let manual_label = if f.editing.is_some() && f.manual_mode == ManualMode::Link { "Link" } else { "Manual" };
+                    for (k, l) in [(Kind::GitHub, "GitHub release"), (Kind::Direct, "Direct link"), (Kind::Site, "Download page"), (Kind::Manual, manual_label)] {
                         if ui.selectable_value(&mut f.kind, k, l).clicked() {
                             f.locked = true;
                         }
@@ -1466,6 +1554,32 @@ impl Manager {
                             }
                         }
                     }
+
+                    ui.label("Icon");
+                    ui.horizontal(|ui| {
+                        if ui.button("Browse…").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .set_title("Pick an icon (png / jpg / bmp / ico, or an exe / dll to take its icon)")
+                                .add_filter("Images and programs", &["png", "jpg", "jpeg", "bmp", "ico", "exe", "dll"])
+                                .pick_file()
+                            {
+                                f.icon_src = Some(p);
+                                f.icon_clear = false;
+                            }
+                        }
+                        if (f.had_icon || f.icon_src.is_some()) && !f.icon_clear && ui.button("Automatic").on_hover_text("Use the program's own icon").clicked() {
+                            f.icon_src = None;
+                            f.icon_clear = f.had_icon;
+                        }
+                        let txt = match (&f.icon_src, f.icon_clear, f.had_icon) {
+                            (Some(p), _, _) => p.display().to_string(),
+                            (None, true, _) => "automatic (on save)".to_string(),
+                            (None, false, true) => "custom icon".to_string(),
+                            _ => "automatic".to_string(),
+                        };
+                        ui.label(RichText::new(txt).weak());
+                    });
+                    ui.end_row();
 
                     ui.label("Launch args");
                     ui.add(egui::TextEdit::singleline(&mut f.args).hint_text("optional").desired_width(f32::INFINITY));
@@ -1569,6 +1683,7 @@ impl Manager {
                     }
                 }
             }
+            let _ = fs::remove_file(e.icon_path(&self.paths)); // our own copy of a custom icon
             self.cfg.apps.retain(|a| a.id != id);
             self.latest.remove(&id);
             self.errors.remove(&id);
