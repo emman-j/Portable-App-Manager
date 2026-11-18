@@ -21,6 +21,8 @@ rustc-ice-*.txt
 
 #rustbox build output(my local compiler)
 rustbox-out
+repomix*compressed.xml
+repomix*.xml
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
