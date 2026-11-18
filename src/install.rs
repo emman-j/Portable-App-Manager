@@ -1,5 +1,3 @@
-//! Extracting archives, finding the executable, launching.
-
 use crate::util;
 use std::{
     fs::{self, File},
@@ -7,7 +5,6 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Command,
 };
-
 pub fn install_file(file: &Path, filename: &str, dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let l = filename.to_lowercase();
@@ -18,14 +15,12 @@ pub fn install_file(file: &Path, filename: &str, dest: &Path) -> Result<(), Stri
     } else if l.ends_with(".7z") {
         extract_7z(file, dest)
     } else {
-        // single file (exe, AppImage, ...) -> copy as-is
         let target = dest.join(util::sanitize(filename));
         fs::copy(file, &target).map_err(|e| format!("Copy failed: {e}"))?;
         set_exec(&target);
         Ok(())
     }
 }
-
 #[cfg(unix)]
 fn set_exec(p: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -37,8 +32,6 @@ fn set_exec(p: &Path) {
 }
 #[cfg(not(unix))]
 fn set_exec(_: &Path) {}
-
-/// If every entry lives under one top-level folder, return that folder name.
 fn common_root(paths: &[PathBuf]) -> Option<PathBuf> {
     if paths.len() < 2 {
         return None;
@@ -56,7 +49,6 @@ fn common_root(paths: &[PathBuf]) -> Option<PathBuf> {
     }
     nested.then(|| PathBuf::from(first.as_os_str()))
 }
-
 fn rel_path(p: &Path, root: Option<&Path>) -> Option<PathBuf> {
     let p = match root {
         Some(r) => p.strip_prefix(r).ok()?,
@@ -67,7 +59,6 @@ fn rel_path(p: &Path, root: Option<&Path>) -> Option<PathBuf> {
     }
     Some(p.to_path_buf())
 }
-
 fn extract_zip(file: &Path, dest: &Path) -> Result<(), String> {
     let mut z = zip::ZipArchive::new(File::open(file).map_err(|e| e.to_string())?)
         .map_err(|e| format!("Not a valid zip: {e}"))?;
@@ -75,7 +66,6 @@ fn extract_zip(file: &Path, dest: &Path) -> Result<(), String> {
         .filter_map(|i| z.by_index(i).ok().and_then(|e| e.enclosed_name()))
         .collect();
     let root = common_root(&names);
-
     for i in 0..z.len() {
         let mut e = z.by_index(i).map_err(|e| e.to_string())?;
         let Some(p) = e.enclosed_name() else { continue };
@@ -100,7 +90,6 @@ fn extract_zip(file: &Path, dest: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-
 fn extract_targz(file: &Path, dest: &Path) -> Result<(), String> {
     let open = || -> Result<_, String> {
         let f = File::open(file).map_err(|e| e.to_string())?;
@@ -111,7 +100,6 @@ fn extract_targz(file: &Path, dest: &Path) -> Result<(), String> {
         names.push(e.map_err(|e| e.to_string())?.path().map_err(|e| e.to_string())?.into_owned());
     }
     let root = common_root(&names);
-
     for e in open()?.entries().map_err(|e| e.to_string())? {
         let mut e = e.map_err(|e| e.to_string())?;
         let p = e.path().map_err(|e| e.to_string())?.into_owned();
@@ -129,12 +117,6 @@ fn extract_targz(file: &Path, dest: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-
-/// Extract a .7z into a scratch folder inside `dest`, strip a single common
-/// top-level folder (like zip/tar.gz do), then merge the result into `dest`.
-///
-/// Safety: every entry name is validated BEFORE extracting (no "..", no absolute paths / drive letters),
-/// and symlinks are never followed or merged.
 fn extract_7z(file: &Path, dest: &Path) -> Result<(), String> {
     {
         let rd = sevenz_rust::SevenZReader::open(file, sevenz_rust::Password::empty())
@@ -145,30 +127,23 @@ fn extract_7z(file: &Path, dest: &Path) -> Result<(), String> {
             }
         }
     }
-
     let scratch = dest.join(".pam-7z-extract");
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
-
     let result = (|| -> Result<(), String> {
         sevenz_rust::decompress_file(file, &scratch).map_err(|e| format!("7z extract failed: {e}"))?;
-
         let entries: Vec<PathBuf> = fs::read_dir(&scratch)
             .map_err(|e| e.to_string())?
             .flatten()
             .map(|e| e.path())
             .collect();
-        // symlink_metadata: a symlink to a folder is NOT treated as a folder
         let single_dir = entries.len() == 1 && fs::symlink_metadata(&entries[0]).map(|m| m.is_dir()).unwrap_or(false);
         let src = if single_dir { entries[0].clone() } else { scratch.clone() };
         merge_move(&src, dest)
     })();
-
     let _ = fs::remove_dir_all(&scratch);
     result
 }
-
-/// Move everything in `from` into `to`, merging folders and overwriting files. Symlinks are skipped.
 fn merge_move(from: &Path, to: &Path) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|e| e.to_string())?;
     for e in fs::read_dir(from).map_err(|e| e.to_string())?.flatten() {
@@ -191,8 +166,6 @@ fn merge_move(from: &Path, to: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-
-/// Copy a whole folder (used when moving the data folder). Symlinks and a top-level `tmp` are skipped.
 pub fn copy_dir_all(from: &Path, to: &Path) -> Result<(), String> {
     fn inner(from: &Path, to: &Path, top: bool) -> Result<(), String> {
         fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
@@ -216,9 +189,6 @@ pub fn copy_dir_all(from: &Path, to: &Path) -> Result<(), String> {
     }
     inner(from, to, true)
 }
-
-// ---------------------------------------------------------------- executables
-
 fn is_exe(path: &Path) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
     if ["unins", "uninstall", "crashpad", "vc_redist", "vcredist", "updater", "update."]
@@ -229,12 +199,10 @@ fn is_exe(path: &Path) -> bool {
     }
     exec_kind(&name, path)
 }
-
 #[cfg(windows)]
 fn exec_kind(name: &str, _path: &Path) -> bool {
     name.ends_with(".exe") || name.ends_with(".bat") || name.ends_with(".cmd")
 }
-
 #[cfg(not(windows))]
 fn exec_kind(name: &str, path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -246,7 +214,6 @@ fn exec_kind(name: &str, path: &Path) -> bool {
     }
     path.is_file() && fs::metadata(path).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
 }
-
 pub fn find_executables(dir: &Path) -> Vec<String> {
     fn walk(base: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
         let Ok(rd) = fs::read_dir(dir) else { return };
@@ -272,7 +239,6 @@ pub fn find_executables(dir: &Path) -> Vec<String> {
     out.sort_by_key(|p| (p.matches('/').count(), p.to_lowercase()));
     out
 }
-
 pub fn pick_default(app_name: &str, list: &[String]) -> Option<String> {
     let key = util::slug(app_name).replace('-', "");
     list.iter()
@@ -283,14 +249,17 @@ pub fn pick_default(app_name: &str, list: &[String]) -> Option<String> {
         .or_else(|| list.first())
         .cloned()
 }
-
 // ---------------------------------------------------------------- launching
-
-pub fn launch(exe: &Path, args: &str) -> Result<(), String> {
+/// Start a program. `admin` = ask Windows for elevation (UAC prompt) right away. Without it, a program that
+/// needs administrator rights (Windows error 740) is retried with the elevation prompt automatically.
+pub fn launch(exe: &Path, args: &str, admin: bool) -> Result<(), String> {
     if !exe.exists() {
         return Err(format!("Not found: {}", exe.display()));
     }
     let args = util::split_args(args);
+    if admin {
+        return run_elevated(exe, &args);
+    }
     let mut cmd;
     if cfg!(target_os = "macos") && exe.extension().map(|e| e == "app").unwrap_or(false) {
         cmd = Command::new("open");
@@ -305,9 +274,54 @@ pub fn launch(exe: &Path, args: &str) -> Result<(), String> {
             cmd.current_dir(parent);
         }
     }
-    let mut child = cmd.spawn().map_err(|e| format!("Launch failed: {e}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        // ERROR_ELEVATION_REQUIRED: the program wants administrator rights
+        Err(e) if cfg!(windows) && e.raw_os_error() == Some(740) => return run_elevated(exe, &args),
+        Err(e) => return Err(format!("Launch failed: {e}")),
+    };
     std::thread::spawn(move || {
         let _ = child.wait();
     });
     Ok(())
+}
+
+/// Run `exe` as administrator: PowerShell's `Start-Process -Verb RunAs` shows the normal Windows UAC prompt.
+#[cfg(windows)]
+fn run_elevated(exe: &Path, args: &[String]) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    // single-quoted PowerShell string: only ' needs doubling
+    fn q(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "''"))
+    }
+    let mut script = format!("Start-Process -FilePath {} -Verb RunAs", q(&exe.to_string_lossy()));
+    if let Some(dir) = exe.parent() {
+        script.push_str(&format!(" -WorkingDirectory {}", q(&dir.to_string_lossy())));
+    }
+    if !args.is_empty() {
+        let list: Vec<String> = args
+            .iter()
+            .map(|a| if a.contains(char::is_whitespace) { q(&format!("\"{a}\"")) } else { q(a) })
+            .collect();
+        script.push_str(&format!(" -ArgumentList {}", list.join(",")));
+    }
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| format!("Could not start PowerShell: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.to_lowercase().contains("canceled") || err.to_lowercase().contains("cancelled") {
+        Err("Cancelled: the administrator prompt was declined".into())
+    } else {
+        Err(format!("Run as administrator failed: {}", err.lines().next().unwrap_or("unknown error")))
+    }
+}
+
+#[cfg(not(windows))]
+fn run_elevated(_exe: &Path, _args: &[String]) -> Result<(), String> {
+    Err("Run as administrator is only available on Windows".into())
 }

@@ -1,12 +1,10 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
-
 mod icons;
 mod install;
 mod model;
 mod net;
 mod util;
 mod version;
-
 use eframe::egui::{self, Color32, RichText};
 use model::{AppEntry, Config, Paths, Source, Theme, ViewMode};
 use std::{
@@ -18,45 +16,32 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use url::Url;
-
-// ------------------------------------------------------------------ messages
-
 struct Installed {
     version: String,
     exe: Option<String>,
 }
-
 enum Msg {
     Progress { id: String, text: String, frac: Option<f32> },
     Checked { id: String, res: Result<net::Remote, String> },
-    /// version read from the exe of a manual / linked app (`None` = could not be read)
     LocalVersion { id: String, version: Option<String> },
     Installed { id: String, res: Result<Installed, String> },
     Icon { id: String, key: String, img: Option<egui::ColorImage> },
-    /// finished copying the data folder to a new location (`None` = the app folder)
     DataMoved { base: Option<PathBuf>, res: Result<(), String> },
 }
-
 struct DataMove {
-    /// chosen base folder; `None` = back to the folder next to the exe
     base: Option<PathBuf>,
     root: PathBuf,
     can_copy: bool,
     copy: bool,
 }
-
 struct IconSlot {
     key: String,
     tex: Option<egui::TextureHandle>,
 }
-
 enum InstallSrc {
-    /// Download from the source (resolve first if `None`).
     Remote(Option<net::Remote>),
-    /// A file the user downloaded / picked themselves.
     File(PathBuf),
 }
-
 fn run_install(
     paths: &Paths,
     entry: &AppEntry,
@@ -67,7 +52,6 @@ fn run_install(
     let dir = entry.dir(paths);
     let tmp = paths.tmp();
     fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-
     let (version, filename, file, is_temp) = match src {
         InstallSrc::Remote(r) => {
             let r = match r {
@@ -90,14 +74,12 @@ fn run_install(
             (util::find_version(&fname).unwrap_or_else(|| "manual".into()), fname, p, false)
         }
     };
-
     progress("Installing…".into(), None);
     let res = install::install_file(&file, &filename, &dir);
     if is_temp {
         let _ = fs::remove_file(&file);
     }
     res?;
-
     let exe_ok = entry.exe.as_ref().map(|e| dir.join(e).exists()).unwrap_or(false);
     let exe = if exe_ok {
         None
@@ -106,9 +88,6 @@ fn run_install(
     };
     Ok(Installed { version, exe })
 }
-
-// ------------------------------------------------------------------ add / edit form
-
 #[derive(PartialEq, Clone, Copy)]
 enum Kind {
     GitHub,
@@ -116,22 +95,17 @@ enum Kind {
     Site,
     Manual,
 }
-
 #[derive(PartialEq, Clone, Copy)]
 enum ManualMode {
     Import,
     Link,
-    /// just create an empty app folder; the user installs / copies the app into it
     Folder,
 }
-
 struct Detected {
     kind: Kind,
     pattern: Option<String>,
     name: String,
 }
-
-/// "owner/repo", "github.com/owner/repo", ".../releases/download/tag/file.zip" -> (repo, file)
 fn parse_github(s: &str) -> Option<(String, Option<String>)> {
     let s = s.trim();
     let (rest, prefixed) = if let Some(r) = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")) {
@@ -150,7 +124,6 @@ fn parse_github(s: &str) -> Option<(String, Option<String>)> {
     if !prefixed && (parts.len() != 2 || parts[0].contains('.') || !valid(parts[0]) || !valid(parts[1])) {
         return None;
     }
-    // validate in BOTH cases (the token is sent with these requests): no "?", "#", "%" ... in owner / repo
     let name = parts[1].split(|c: char| c == '?' || c == '#').next().unwrap_or("").trim_end_matches(".git");
     if !valid(parts[0]) || !valid(name) {
         return None;
@@ -160,7 +133,6 @@ fn parse_github(s: &str) -> Option<(String, Option<String>)> {
         .then(|| percent_encoding::percent_decode_str(parts[parts.len() - 1]).decode_utf8_lossy().to_string());
     Some((repo, file))
 }
-
 fn detect(input: &str) -> Option<Detected> {
     let s = input.trim();
     if s.is_empty() {
@@ -181,7 +153,6 @@ fn detect(input: &str) -> Option<Detected> {
         Some(Detected { kind: Kind::Site, pattern: None, name: u.host_str().unwrap_or("").trim_start_matches("www.").to_string() })
     }
 }
-
 struct Form {
     editing: Option<String>,
     name: String,
@@ -207,7 +178,6 @@ struct Form {
     had_icon: bool,
     error: String,
 }
-
 impl Form {
     fn new() -> Self {
         Form {
@@ -234,7 +204,6 @@ impl Form {
             error: String::new(),
         }
     }
-
     fn from_entry(e: &AppEntry, paths: &Paths) -> Self {
         let mut f = Form::new();
         f.editing = Some(e.id.clone());
@@ -271,7 +240,6 @@ impl Form {
         f.last_input = f.input.clone();
         f
     }
-
     fn on_input_changed(&mut self) {
         if self.input == self.last_input {
             return;
@@ -293,7 +261,6 @@ impl Form {
             self.auto_name = d.name;
         }
     }
-
     fn to_source(&self) -> Result<Source, String> {
         let input = self.input.trim();
         match self.kind {
@@ -323,32 +290,24 @@ impl Form {
         }
     }
 }
-
-// ------------------------------------------------------------------ app
-
 enum Act {
     Launch,
+    /// Windows: start with the administrator (UAC) prompt
+    LaunchAdmin,
     Update,
     Check,
     Reinstall,
     Import,
     OpenDir,
     Edit,
-    /// look for an executable inside the app folder and select it
     Detect,
-    /// pick a custom icon image for the app
     SetIcon,
-    /// go back to the automatic icon
     ResetIcon,
-    /// dissolve a group (the id slot carries the group path)
     Ungroup,
-    /// rename a group (the id slot carries the group name)
     RenameGroup,
     Remove,
-    /// open a folder in tile view (the id slot carries the group path)
     Group,
 }
-
 struct Manager {
     paths: Paths,
     cfg: Config,
@@ -362,26 +321,19 @@ struct Manager {
     remove: Option<(String, bool)>,
     show_settings: bool,
     toast: Option<(String, Instant)>,
-    /// the group whose popup window is open (tile view)
     open_group: Option<String>,
-    /// bumped every time a group popup is opened, so it starts at a fresh, fitted size
     group_gen: u32,
-    /// group rename dialog: (old name, text being edited)
     rename: Option<(String, String)>,
     import_confirm: bool,
     data_move: Option<DataMove>,
     moving: bool,
     icons: HashMap<String, IconSlot>,
     icon_pending: HashSet<String>,
-    /// bumped whenever a custom icon is set / reset, so cached icons are reloaded
     icon_rev: u32,
-    /// theme / font size changed: re-apply them to egui at the start of the next frame
     style_dirty: bool,
     last_win: Option<[f32; 2]>,
     win_maxi: bool,
 }
-
-/// egui's built-in fonts lack some symbols (⇅ ▦ ⋮ show up as empty boxes). Add a system symbol font as a fallback.
 fn setup_fonts(ctx: &egui::Context) {
     let mut candidates: Vec<PathBuf> = Vec::new();
     let win = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Windows"));
@@ -402,7 +354,6 @@ fn setup_fonts(ctx: &egui::Context) {
     }
     ctx.set_fonts(fonts);
 }
-
 fn truncate(s: &str, max: usize) -> String {
     let max = max.max(4);
     if s.chars().count() <= max {
@@ -411,13 +362,11 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{}…", s.chars().take(max - 1).collect::<String>())
     }
 }
-
 enum TileItem<'a> {
     /// a group (folder) tile, by group name
     Folder(String),
     App(&'a AppEntry),
 }
-
 impl Manager {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_fonts(&cc.egui_ctx);
@@ -458,7 +407,6 @@ impl Manager {
         }
         m
     }
-
     /// Apply the theme and font size from the settings.
     fn apply_style(&self, ctx: &egui::Context) {
         ctx.set_theme(match self.cfg.theme {
@@ -475,21 +423,17 @@ impl Manager {
                 .collect();
         });
     }
-
     fn save(&mut self) {
         if let Err(e) = self.cfg.save(&self.paths) {
             self.say(format!("Could not save config: {e}"));
         }
     }
-
     fn say(&mut self, s: impl Into<String>) {
         self.toast = Some((s.into(), Instant::now()));
     }
-
     fn entry(&self, id: &str) -> Option<&AppEntry> {
         self.cfg.apps.iter().find(|a| a.id == id)
     }
-
     fn update_available(&self, e: &AppEntry) -> bool {
         match (self.latest.get(&e.id), &e.version) {
             (Some(r), Some(v)) => r.version != "?" && &r.version != v,
@@ -497,9 +441,7 @@ impl Manager {
             _ => false,
         }
     }
-
     // ---- background work
-
     fn check_all(&mut self, ctx: &egui::Context) {
         // manual / linked apps have no update source: their version is read from the exe instead
         let ids: Vec<String> = self.cfg.apps.iter().filter(|a| a.source.can_check() || a.exe.is_some()).map(|a| a.id.clone()).collect();
@@ -507,7 +449,6 @@ impl Manager {
             self.start_check(ctx, &id);
         }
     }
-
     fn start_check(&mut self, ctx: &egui::Context, id: &str) {
         let Some(e) = self.entry(id).cloned() else { return };
         if self.busy.contains_key(id) {
@@ -532,7 +473,6 @@ impl Manager {
             ctx.request_repaint();
         });
     }
-
     fn start_install(&mut self, ctx: &egui::Context, id: &str, src: InstallSrc) {
         let Some(e) = self.entry(id).cloned() else { return };
         if self.busy.contains_key(id) {
@@ -551,7 +491,6 @@ impl Manager {
             ctx.request_repaint();
         });
     }
-
     fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
@@ -620,15 +559,14 @@ impl Manager {
             }
         }
     }
-
     // ---- actions
-
     fn act(&mut self, ctx: &egui::Context, id: String, act: Act) {
         match act {
-            Act::Launch => {
+            a @ (Act::Launch | Act::LaunchAdmin) => {
+                let admin = matches!(a, Act::LaunchAdmin);
                 if let Some(e) = self.entry(&id) {
                     let r = match e.exe_path(&self.paths) {
-                        Some(p) => install::launch(&p, &e.args),
+                        Some(p) => install::launch(&p, &e.args, admin),
                         None => Err("No executable selected - use Edit".into()),
                     };
                     if let Err(err) = r {
@@ -713,7 +651,6 @@ impl Manager {
             }
         }
     }
-
     /// Save `src` as the app's own icon (converted to a small PNG inside the data folder).
     fn apply_icon(&mut self, id: &str, src: &std::path::Path) -> Result<(), String> {
         let Some(e) = self.entry(id) else { return Err("App not found".into()) };
@@ -726,7 +663,6 @@ impl Manager {
         self.save();
         Ok(())
     }
-
     fn clear_icon(&mut self, id: &str) {
         if let Some(e) = self.entry(id) {
             let _ = fs::remove_file(e.icon_path(&self.paths));
@@ -737,14 +673,12 @@ impl Manager {
         self.icon_rev = self.icon_rev.wrapping_add(1);
         self.save();
     }
-
     fn submit_form(&mut self, ctx: &egui::Context, f: &Form) -> Result<(), String> {
         let name = f.name.trim();
         if name.is_empty() {
             return Err("Give the app a name".into());
         }
         let source = f.to_source()?;
-
         if let Some(id) = &f.editing {
             if let Some(e) = self.cfg.apps.iter_mut().find(|a| &a.id == id) {
                 e.name = name.into();
@@ -765,7 +699,6 @@ impl Manager {
             }
             return Ok(());
         }
-
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let id = format!("{}-{:x}", util::slug(name), nanos % 0xFFFFFF);
         let mut entry = AppEntry {
@@ -779,7 +712,6 @@ impl Manager {
             group: util::norm_group(&f.group),
             custom_icon: false,
         };
-
         let mut to_install: Option<InstallSrc> = None;
         let mut new_folder: Option<PathBuf> = None;
         match (&source, f.manual_mode) {
@@ -820,9 +752,6 @@ impl Manager {
         }
         Ok(())
     }
-
-    // ---- export / import (app list only, no downloaded files, no token)
-
     fn export_apps(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Export app list")
@@ -839,9 +768,9 @@ impl Manager {
             .cloned()
             .map(|mut a| {
                 if a.managed {
-                    a.version = None; // will be (re)installed on the other PC
+                    a.version = None;
                 }
-                a.custom_icon = false; // icon files are not part of the export
+                a.custom_icon = false;
                 a
             })
             .collect();
@@ -855,8 +784,6 @@ impl Manager {
             Err(e) => self.say(format!("Export failed: {e}")),
         }
     }
-
-    /// Called after the user confirmed the trust warning.
     fn import_apps(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Import app list")
@@ -886,13 +813,11 @@ impl Manager {
                     skipped += 1;
                     continue;
                 }
-                // ids become folder names: never trust them
                 if !util::valid_id(&a.id) {
                     a.id = format!("{}-{:x}", util::slug(&a.name), (nanos + n as u128) % 0xFFFFFF);
                 }
                 if a.managed {
                     a.version = None;
-                    // the exe must be a plain relative path inside the app folder
                     if let Some(e) = &a.exe {
                         let p = std::path::Path::new(e);
                         if p.is_absolute() || !p.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
@@ -900,12 +825,11 @@ impl Manager {
                         }
                     }
                 } else {
-                    // linked programs point at a path on the OLD pc: never import it, re-link on this PC
                     a.exe = None;
                     relink += 1;
                 }
                 a.group = util::norm_group(&a.group);
-                a.custom_icon = false; // never trust an icon flag from a file
+                a.custom_icon = false;
                 self.cfg.apps.push(a);
                 added += 1;
             }
@@ -923,8 +847,6 @@ impl Manager {
             Err(e) => self.say(format!("Import failed: {e}")),
         }
     }
-
-    /// Ask before switching the data folder; nothing changes until the user confirms.
     fn begin_move(&mut self, base: Option<PathBuf>) {
         let root = Paths::root_for(&base.clone().unwrap_or_else(Paths::exe_dir));
         if root == self.paths.root {
@@ -942,8 +864,6 @@ impl Manager {
         let can_copy = !root.join("config.json").exists();
         self.data_move = Some(DataMove { base, root, can_copy, copy: can_copy });
     }
-
-    /// Point the app at the new data folder (the old one is left untouched).
     fn finish_switch(&mut self, base: Option<PathBuf>) {
         let root = Paths::root_for(&base.clone().unwrap_or_else(Paths::exe_dir));
         if let Err(e) = Paths::write_pointer(base.as_deref()) {
@@ -960,23 +880,14 @@ impl Manager {
         self.open_group = None;
         self.say(format!("Data folder is now {} (the old folder was left in place)", self.paths.root.display()));
     }
-
-    // ---- UI pieces
-
-    // ---- groups
-
-    /// All group names (groups are one level only), sorted.
     fn all_groups(&self) -> Vec<String> {
         let set: BTreeSet<String> = self.cfg.apps.iter().filter(|a| !a.group.is_empty()).map(|a| a.group.clone()).collect();
         set.into_iter().collect()
     }
-
     fn in_group<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a AppEntry> + 'a {
         self.cfg.apps.iter().filter(move |a| a.group == name)
     }
-
     // ---- icons
-
     fn ensure_icons(&mut self, ctx: &egui::Context) {
         for a in &self.cfg.apps {
             let exe = a.exe_path(&self.paths);
@@ -1008,8 +919,6 @@ impl Manager {
             });
         }
     }
-
-    /// Real icon if we have one, otherwise a coloured tile with the first letter.
     fn paint_icon(&self, p: &egui::Painter, rect: egui::Rect, e: &AppEntry) {
         if let Some(t) = self.icons.get(&e.id).and_then(|s| s.tex.as_ref()) {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -1026,14 +935,10 @@ impl Manager {
             p.text(rect.center(), egui::Align2::CENTER_CENTER, letter, egui::FontId::proportional(rect.height() * 0.5), Color32::WHITE);
         }
     }
-
     fn icon(&self, ui: &mut egui::Ui, e: &AppEntry, size: f32) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
         self.paint_icon(ui.painter(), rect, e);
     }
-
-    // ---- shared per-app menu (⋮ in list view, right-click in tile view)
-
     fn menu_items(&self, ui: &mut egui::Ui, e: &AppEntry, acts: &mut Vec<(String, Act)>, extra: bool) {
         let id = e.id.clone();
         let busy = self.busy.contains_key(&id);
@@ -1051,6 +956,9 @@ impl Manager {
                 push(ui, if manual { Act::Import } else { Act::Update });
             }
             ui.separator();
+        }
+        if cfg!(windows) && e.exe.is_some() && ui.button("Run as administrator").clicked() {
+            push(ui, Act::LaunchAdmin);
         }
         if e.source.can_check() && ui.button("Check for update").clicked() {
             push(ui, Act::Check);
@@ -1083,8 +991,6 @@ impl Manager {
             push(ui, Act::Remove);
         }
     }
-
-    /// Dissolve a group: its apps become ungrouped (nothing is deleted).
     fn ungroup(&mut self, name: &str) {
         let mut n = 0;
         for a in self.cfg.apps.iter_mut() {
@@ -1099,8 +1005,6 @@ impl Manager {
         self.save();
         self.say(format!("Ungrouped “{name}” ({n} app(s))"));
     }
-
-    /// Rename a group. If the new name already exists the two groups are merged.
     fn rename_group(&mut self, old: &str, new: &str) -> Result<(), String> {
         let new = util::norm_group(new);
         if new.is_empty() {
@@ -1126,7 +1030,6 @@ impl Manager {
         });
         Ok(())
     }
-
     fn rename_window(&mut self, ctx: &egui::Context) {
         let Some((old, mut text)) = self.rename.clone() else { return };
         let (mut ok, mut cancel) = (false, false);
@@ -1171,9 +1074,6 @@ impl Manager {
             self.rename = Some((old, text));
         }
     }
-
-    // ---- list view (collapsible groups, one level)
-
     fn list_level(&self, ui: &mut egui::Ui, acts: &mut Vec<(String, Act)>) {
         for name in self.all_groups() {
             let n = self.in_group(&name).count();
@@ -1206,9 +1106,6 @@ impl Manager {
             self.card(ui, e, acts);
         }
     }
-
-    // ---- tile view: group tiles + ungrouped apps; clicking a group opens a popup window
-
     fn tiles_level(&self, ui: &mut egui::Ui, ts: f32, acts: &mut Vec<(String, Act)>) {
         let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| a.group.is_empty()).collect();
         apps.sort_by_key(|a| a.name.to_lowercase());
@@ -1216,9 +1113,6 @@ impl Manager {
         items.extend(apps.into_iter().map(TileItem::App));
         self.tile_grid(ui, ts, 0, &items, acts);
     }
-
-    /// Lay tiles out: as many per row as fit the window (`cols` = 0), or exactly `cols` per row
-    /// at full size (used by the group popup, which sizes itself to fit).
     fn tile_grid(&self, ui: &mut egui::Ui, ts: f32, cols: usize, items: &[TileItem<'_>], acts: &mut Vec<(String, Act)>) {
         let gap = 10.0;
         let draw = |ui: &mut egui::Ui, it: &TileItem<'_>, size: f32, acts: &mut Vec<(String, Act)>| match it {
@@ -1233,7 +1127,6 @@ impl Manager {
                 }
             });
         } else {
-            // centre the whole block of `cols` tiles horizontally (rows stay left-aligned inside it)
             let block = cols as f32 * ts + gap * (cols as f32 - 1.0);
             let pad = ((ui.available_width() - block) / 2.0).max(0.0);
             for row in items.chunks(cols) {
@@ -1249,7 +1142,6 @@ impl Manager {
             }
         }
     }
-
     fn folder_tile(&self, ui: &mut egui::Ui, name: &str, ts: f32, acts: &mut Vec<(String, Act)>) {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ts, ts * 1.2), egui::Sense::click());
         let is_open = self.open_group.as_deref() == Some(name);
@@ -1260,7 +1152,6 @@ impl Manager {
         let p = ui.painter();
         p.rect_filled(rect, 8.0, fill);
         p.rect_stroke(rect, 8.0, stroke);
-
         let members: Vec<&AppEntry> = self.in_group(name).collect();
         let area = ts * 0.56;
         let origin = egui::pos2(rect.center().x - area / 2.0, rect.top() + ts * 0.1);
@@ -1294,8 +1185,6 @@ impl Manager {
             acts.push((name.to_string(), Act::Group));
         }
     }
-
-    /// The open group as a floating window (like a Start-menu folder): group title on top, tiles inside.
     fn group_window(&mut self, ctx: &egui::Context, acts: &mut Vec<(String, Act)>) {
         let Some(name) = self.open_group.clone() else { return };
         let mut apps: Vec<&AppEntry> = self.in_group(&name).collect();
@@ -1303,15 +1192,12 @@ impl Manager {
         let items: Vec<TileItem> = apps.into_iter().map(TileItem::App).collect();
         let gap = 10.0;
         let screen = ctx.screen_rect();
-        // max icons per row; never more columns than apps, so the window hugs its content
         let max_cols = if self.cfg.max_per_row == 0 { 3 } else { self.cfg.max_per_row as usize };
         let cols = max_cols.min(items.len()).max(1);
-        // shrink the icons only if the chosen row would not fit on screen
         let avail = (screen.width() - 80.0 - gap * (cols as f32 - 1.0)) / cols as f32;
         let ts = self.cfg.group_tile_size.clamp(90.0, 200.0).min(avail).max(60.0);
         let width = (cols as f32 * ts + gap * (cols as f32 - 1.0)).max(190.0);
         let mut open = true;
-        // a new id per opening: the window starts fitted to its icons, then stays freely resizable
         egui::Window::new(format!("📁 {name}"))
             .id(egui::Id::new(("group_popup", self.group_gen)))
             .open(&mut open)
@@ -1341,7 +1227,6 @@ impl Manager {
             self.open_group = None;
         }
     }
-
     fn tile(&self, ui: &mut egui::Ui, e: &AppEntry, ts: f32, acts: &mut Vec<(String, Act)>) {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ts, ts * 1.2), egui::Sense::click());
         let busy = self.busy.get(&e.id);
@@ -1352,15 +1237,12 @@ impl Manager {
         let fill = if resp.hovered() { vis.widgets.hovered.bg_fill } else { vis.widgets.inactive.weak_bg_fill };
         let stroke = if resp.hovered() { vis.widgets.hovered.bg_stroke } else { vis.widgets.noninteractive.bg_stroke };
         let (txt, weak) = (vis.text_color(), vis.weak_text_color());
-
         let p = ui.painter();
         p.rect_filled(rect, 8.0, fill);
         p.rect_stroke(rect, 8.0, stroke);
-
         let isz = ts * 0.5;
         let irect = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + ts * 0.12 + isz / 2.0), egui::vec2(isz, isz));
         self.paint_icon(p, irect, e);
-
         let sc = self.cfg.font_scale;
         let max = ((ts - 10.0) / (7.0 * sc)) as usize;
         let y = irect.bottom() + 8.0;
@@ -1371,7 +1253,6 @@ impl Manager {
             (None, None) => "Not installed".into(),
         };
         p.text(egui::pos2(rect.center().x, y + 17.0 * sc), egui::Align2::CENTER_TOP, truncate(&status, max), egui::FontId::proportional(11.0 * sc), weak);
-
         if has_update {
             p.circle_filled(rect.right_top() + egui::vec2(-12.0, 12.0), 5.0, Color32::LIGHT_GREEN);
         } else if !installed && e.managed {
@@ -1386,7 +1267,6 @@ impl Manager {
             let f = frac.unwrap_or(0.15).clamp(0.0, 1.0);
             p.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * f, 4.0)), 2.0, Color32::LIGHT_GREEN);
         }
-
         if resp.clicked() && busy.is_none() {
             let manual = matches!(e.source, Source::Manual);
             if e.exe.is_some() {
@@ -1398,7 +1278,6 @@ impl Manager {
             }
         }
         resp.context_menu(|ui| self.menu_items(ui, e, acts, true));
-
         let mut tip = format!("{}\n{}", e.name, e.describe());
         if has_update {
             if let Some(r) = self.latest.get(&e.id) {
@@ -1411,15 +1290,11 @@ impl Manager {
         tip.push_str("\nClick: launch · Right-click: more");
         resp.on_hover_text(tip);
     }
-
-    // ---- list-view card
-
     fn card(&self, ui: &mut egui::Ui, e: &AppEntry, acts: &mut Vec<(String, Act)>) {
         let busy = self.busy.get(&e.id);
         let has_update = self.update_available(e);
         let installed = e.version.is_some();
         let id = e.id.clone();
-
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -1450,7 +1325,6 @@ impl Manager {
                     }
                 });
             });
-
             ui.horizontal_wrapped(|ui| {
                 match &e.version {
                     Some(v) => ui.label(format!("Installed: {v}")),
@@ -1465,7 +1339,6 @@ impl Manager {
                 }
             });
             ui.label(RichText::new(e.describe()).small().weak());
-
             if let Some((text, frac)) = busy {
                 ui.horizontal(|ui| {
                     match frac {
@@ -1485,13 +1358,11 @@ impl Manager {
         });
         ui.add_space(4.0);
     }
-
     fn form_window(&mut self, ctx: &egui::Context) {
         let Some(mut f) = self.form.take() else { return };
         let groups = self.all_groups();
         let (mut open, mut submit, mut cancel) = (true, false, false);
         let title = if f.editing.is_some() { "Edit app" } else { "Add app" };
-
         egui::Window::new(title)
             .open(&mut open)
             .collapsible(false)
@@ -1508,7 +1379,6 @@ impl Manager {
                     );
                     f.on_input_changed();
                 }
-
                 ui.horizontal(|ui| {
                     ui.label("Type:");
                     let manual_label = if f.editing.is_some() && f.manual_mode == ManualMode::Link { "Link" } else { "Manual" };
@@ -1518,12 +1388,10 @@ impl Manager {
                         }
                     }
                 });
-
                 egui::Grid::new("form").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                     ui.label("Name");
                     ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(f32::INFINITY));
                     ui.end_row();
-
                     ui.label("Group");
                     ui.horizontal(|ui| {
                         ui.add(
@@ -1542,7 +1410,6 @@ impl Manager {
                         }
                     });
                     ui.end_row();
-
                     match f.kind {
                         Kind::GitHub => {
                             ui.label("Package name\n(no version)");
@@ -1601,7 +1468,6 @@ impl Manager {
                             }
                         }
                     }
-
                     ui.label("Icon");
                     ui.horizontal(|ui| {
                         if ui.button("Browse…").clicked() {
@@ -1627,11 +1493,9 @@ impl Manager {
                         ui.label(RichText::new(txt).weak());
                     });
                     ui.end_row();
-
                     ui.label("Launch args");
                     ui.add(egui::TextEdit::singleline(&mut f.args).hint_text("optional").desired_width(f32::INFINITY));
                     ui.end_row();
-
                     if f.editing.is_some() {
                         ui.label("Executable");
                         ui.horizontal(|ui| {
@@ -1652,7 +1516,6 @@ impl Manager {
                         ui.end_row();
                     }
                 });
-
                 if !f.error.is_empty() {
                     ui.colored_label(Color32::LIGHT_RED, &f.error);
                 }
@@ -1673,7 +1536,6 @@ impl Manager {
                     }
                 });
             });
-
         if !open || cancel {
             return;
         }
@@ -1685,7 +1547,6 @@ impl Manager {
         }
         self.form = Some(f);
     }
-
     fn remove_window(&mut self, ctx: &egui::Context) {
         let Some((id, mut delete)) = self.remove.clone() else { return };
         let Some(e) = self.entry(&id).cloned() else {
@@ -1730,7 +1591,7 @@ impl Manager {
                     }
                 }
             }
-            let _ = fs::remove_file(e.icon_path(&self.paths)); // our own copy of a custom icon
+            let _ = fs::remove_file(e.icon_path(&self.paths));
             self.cfg.apps.retain(|a| a.id != id);
             self.latest.remove(&id);
             self.errors.remove(&id);
@@ -1743,7 +1604,6 @@ impl Manager {
             self.remove = Some((id, delete));
         }
     }
-
     fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             return;
@@ -1781,7 +1641,6 @@ impl Manager {
                 if r.changed() {
                     changed = true;
                 }
-                // apply when the drag ends, so the window doesn't resize under the cursor
                 if r.drag_stopped() || (r.changed() && !r.dragged()) {
                     style_changed = true;
                 }
@@ -1854,8 +1713,6 @@ impl Manager {
             self.begin_move(None);
         }
     }
-
-    /// Trust warning shown before an app list is imported.
     fn import_window(&mut self, ctx: &egui::Context) {
         if !self.import_confirm {
             return;
@@ -1889,8 +1746,6 @@ impl Manager {
             self.import_confirm = false;
         }
     }
-
-    /// Confirmation (and progress) for moving the data folder.
     fn move_window(&mut self, ctx: &egui::Context) {
         if self.moving {
             egui::Window::new("Copying data…")
@@ -1949,7 +1804,6 @@ impl Manager {
         }
     }
 }
-
 impl eframe::App for Manager {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if self.cfg.remember_window {
@@ -1960,7 +1814,6 @@ impl eframe::App for Manager {
             self.save();
         }
     }
-
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.style_dirty {
             self.apply_style(ctx);
@@ -1968,7 +1821,6 @@ impl eframe::App for Manager {
         }
         self.poll(ctx);
         self.ensure_icons(ctx);
-        // remember the (non-maximized) window size so it can be saved on exit
         ctx.input(|i| {
             let vp = i.viewport();
             self.win_maxi = vp.maximized.unwrap_or(false);
@@ -1986,12 +1838,10 @@ impl eframe::App for Manager {
                 self.open_group = None;
             }
         }
-
         let (mut add, mut check_all, mut update_all, mut export, mut import) = (false, false, false, false, false);
         let mut view_changed = false;
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
-            // row 1: title + actions (wraps when the window is narrow)
             ui.horizontal_wrapped(|ui| {
                 ui.heading("Portable App Manager");
                 ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).small().weak())
@@ -2015,7 +1865,6 @@ impl eframe::App for Manager {
                 }
             });
             ui.add_space(2.0);
-            // row 2: filter + view options
             ui.horizontal_wrapped(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("🔍 filter").desired_width(200.0));
                 ui.separator();
@@ -2029,11 +1878,9 @@ impl eframe::App for Manager {
             });
             ui.add_space(4.0);
         });
-
         if view_changed {
             self.save();
         }
-
         let mut acts: Vec<(String, Act)> = Vec::new();
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.cfg.apps.is_empty() {
@@ -2048,7 +1895,6 @@ impl eframe::App for Manager {
             let ts = self.cfg.tile_size.clamp(90.0, 200.0);
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 if !q.is_empty() {
-                    // searching: flat results, groups ignored
                     let mut apps: Vec<&AppEntry> = self.cfg.apps.iter().filter(|a| a.name.to_lowercase().contains(&q)).collect();
                     apps.sort_by_key(|a| a.name.to_lowercase());
                     if self.cfg.view == ViewMode::Tiles {
@@ -2066,8 +1912,6 @@ impl eframe::App for Manager {
                 }
             });
         });
-
-        // bottom status line
         if let Some((msg, t)) = &self.toast {
             if t.elapsed() < Duration::from_secs(6) {
                 egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -2078,7 +1922,6 @@ impl eframe::App for Manager {
                 self.toast = None;
             }
         }
-
         if add {
             let mut f = Form::new();
             if self.cfg.view == ViewMode::Tiles {
@@ -2090,7 +1933,7 @@ impl eframe::App for Manager {
             self.export_apps();
         }
         if import {
-            self.import_confirm = true; // ask first, see import_window()
+            self.import_confirm = true;
         }
         if check_all {
             self.check_all(ctx);
@@ -2116,7 +1959,6 @@ impl eframe::App for Manager {
             self.act(ctx, id, a);
         }
         self.rename_window(ctx);
-
         self.form_window(ctx);
         self.remove_window(ctx);
         self.settings_window(ctx);
@@ -2124,13 +1966,8 @@ impl eframe::App for Manager {
         self.move_window(ctx);
     }
 }
-
-/// e.g. "0.1.0 (a1b2c3d, 2026-11-03)"  -  version comes from Cargo.toml, hash + date from build.rs
 const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("PAM_GIT_HASH"), ", ", env!("PAM_BUILD_DATE"), ")");
-
-/// Normalised 256x256 version of src/icon/icon.png, produced by build.rs. Replace the source file and rebuild to change the icon.
 const ICON_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon256.png"));
-
 fn window_icon() -> Option<egui::IconData> {
     let mut img = image::load_from_memory(ICON_PNG).ok()?;
     if img.width() > 256 || img.height() > 256 {
@@ -2140,7 +1977,6 @@ fn window_icon() -> Option<egui::IconData> {
     let (width, height) = rgba.dimensions();
     Some(egui::IconData { rgba: rgba.into_raw(), width, height })
 }
-
 fn main() -> eframe::Result<()> {
     let saved = Config::load(&Paths::detect());
     let size = saved
@@ -2158,7 +1994,6 @@ fn main() -> eframe::Result<()> {
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
-    // centered: open in the middle of the screen (not supported on Wayland)
     let options = eframe::NativeOptions { viewport, centered: true, ..Default::default() };
     eframe::run_native(
         "Portable App Manager",
