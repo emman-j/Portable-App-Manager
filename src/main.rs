@@ -3,6 +3,7 @@ mod icons;
 mod install;
 mod model;
 mod net;
+mod selfupdate;
 mod util;
 mod version;
 use eframe::egui::{self, Color32, RichText};
@@ -21,6 +22,11 @@ struct Installed {
     exe: Option<String>,
 }
 enum Msg {
+    /// result of checking for a new Portable App Manager version (`manual` = the user asked)
+    SelfChecked { res: Result<Option<selfupdate::Release>, String>, manual: bool },
+    SelfProgress { frac: Option<f32> },
+    /// the new exe is in place (`restart` = restart straight away)
+    SelfInstalled { res: Result<PathBuf, String>, restart: bool },
     Progress { id: String, text: String, frac: Option<f32> },
     Checked { id: String, res: Result<net::Remote, String> },
     LocalVersion { id: String, version: Option<String> },
@@ -333,6 +339,18 @@ struct Manager {
     style_dirty: bool,
     last_win: Option<[f32; 2]>,
     win_maxi: bool,
+    /// a newer Portable App Manager release, if one was found
+    upd: Option<selfupdate::Release>,
+    upd_checking: bool,
+    /// Some = downloading / installing (inner = fraction)
+    upd_progress: Option<Option<f32>>,
+    /// installed, waiting for a restart
+    upd_ready: Option<PathBuf>,
+    /// "Later": hide the banner for this session
+    upd_dismissed: bool,
+    show_notes: bool,
+    /// exe to start when this process exits
+    restart_exe: Option<PathBuf>,
 }
 fn setup_fonts(ctx: &egui::Context) {
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -398,12 +416,23 @@ impl Manager {
             style_dirty: true,
             last_win: None,
             win_maxi: false,
+            upd: None,
+            upd_checking: false,
+            upd_progress: None,
+            upd_ready: None,
+            upd_dismissed: false,
+            show_notes: false,
+            restart_exe: None,
         };
+        selfupdate::cleanup();
         if !m.cfg.remember_window {
             m.cfg.tile_size = m.cfg.default_tile_size;
         }
         if m.cfg.auto_check {
             m.check_all(&cc.egui_ctx);
+        }
+        if m.cfg.update_check {
+            m.start_self_check(&cc.egui_ctx, false);
         }
         m
     }
@@ -428,6 +457,182 @@ impl Manager {
             self.say(format!("Could not save config: {e}"));
         }
     }
+    // ---- Portable App Manager's own updates
+
+    fn start_self_check(&mut self, ctx: &egui::Context, manual: bool) {
+        if self.upd_checking {
+            return;
+        }
+        if self.cfg.update_repo.trim().is_empty() {
+            if manual {
+                self.say("Set the update source (owner/repo) in Settings first");
+            }
+            return;
+        }
+        self.upd_checking = true;
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        let (repo, pattern, pre) = (self.cfg.update_repo.clone(), self.cfg.update_asset.clone(), self.cfg.update_prerelease);
+        thread::spawn(move || {
+            let res = selfupdate::check(&repo, &pattern, pre);
+            let _ = tx.send(Msg::SelfChecked { res, manual });
+            ctx.request_repaint();
+        });
+    }
+
+    fn start_self_install(&mut self, ctx: &egui::Context, restart: bool) {
+        let Some(rel) = self.upd.clone() else { return };
+        if self.upd_progress.is_some() || self.upd_ready.is_some() || !rel.can_install() {
+            return;
+        }
+        self.upd_progress = Some(None);
+        let (tx, ctx, tmp) = (self.tx.clone(), ctx.clone(), self.paths.tmp());
+        thread::spawn(move || {
+            let (tx2, ctx2) = (tx.clone(), ctx.clone());
+            let res = selfupdate::download_and_install(&rel, &tmp, |done, total| {
+                let frac = total.filter(|t| *t > 0).map(|t| done as f32 / t as f32);
+                let _ = tx2.send(Msg::SelfProgress { frac });
+                ctx2.request_repaint();
+            });
+            let _ = tx.send(Msg::SelfInstalled { res, restart });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Banner shown while a new version is available / being installed.
+    fn update_banner(&mut self, ctx: &egui::Context) {
+        if self.upd_dismissed {
+            return;
+        }
+        let Some(r) = self.upd.clone() else { return };
+        let (progress, ready) = (self.upd_progress, self.upd_ready.is_some());
+        let (mut notes, mut install, mut skip, mut later, mut restart, mut page) = (false, false, false, false, false, false);
+        egui::TopBottomPanel::top("self_update").show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if ready {
+                    ui.label(RichText::new(format!("✔ Version {} is installed - restart to finish", r.version)).strong());
+                    if ui.button("Restart now").clicked() {
+                        restart = true;
+                    }
+                } else if let Some(frac) = progress {
+                    ui.label(format!("Downloading version {}…", r.version));
+                    match frac {
+                        Some(f) => {
+                            ui.add(egui::ProgressBar::new(f).desired_width(200.0).show_percentage());
+                        }
+                        None => {
+                            ui.spinner();
+                        }
+                    }
+                } else {
+                    ui.label(RichText::new(format!("⬆ Version {} is available (you have {})", r.version, selfupdate::current_version())).strong());
+                    if ui.button("What's new").clicked() {
+                        notes = true;
+                    }
+                    if r.can_install() {
+                        if ui.button("Update now").clicked() {
+                            install = true;
+                        }
+                    } else {
+                        ui.label(RichText::new("no file for this system").weak());
+                        if ui.button("Open release page").clicked() {
+                            page = true;
+                        }
+                    }
+                    if ui.button("Skip this version").clicked() {
+                        skip = true;
+                    }
+                    if ui.button("Later").clicked() {
+                        later = true;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+        });
+        if notes {
+            self.show_notes = true;
+        }
+        if install {
+            self.start_self_install(ctx, true);
+        }
+        if page && r.page.starts_with("https://") {
+            let _ = open::that(&r.page);
+        }
+        if skip {
+            self.cfg.skipped_version = r.version.clone();
+            self.save();
+            self.upd = None;
+            self.show_notes = false;
+        }
+        if later {
+            self.upd_dismissed = true;
+        }
+        if restart {
+            self.restart_exe = self.upd_ready.take();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// The release notes of the new version.
+    fn notes_window(&mut self, ctx: &egui::Context) {
+        if !self.show_notes {
+            return;
+        }
+        let Some(r) = self.upd.clone() else {
+            self.show_notes = false;
+            return;
+        };
+        let can_update = r.can_install() && self.upd_progress.is_none() && self.upd_ready.is_none();
+        let (mut open, mut page, mut install) = (true, false, false);
+        egui::Window::new(format!("What's new in {}", r.version))
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(520.0)
+            .default_pos(ctx.screen_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
+            .show(ctx, |ui| {
+                if !r.name.is_empty() && r.name != r.tag {
+                    ui.strong(&r.name);
+                }
+                egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                    if r.notes.trim().is_empty() {
+                        ui.label(RichText::new("This release has no notes.").weak());
+                    }
+                    // light markdown: headings in bold, bullets as dots, everything else as plain text
+                    for line in r.notes.lines() {
+                        let t = line.trim();
+                        if t.is_empty() {
+                            ui.add_space(4.0);
+                        } else if t.starts_with('#') {
+                            ui.label(RichText::new(t.trim_start_matches('#').trim()).strong());
+                        } else if let Some(b) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
+                            ui.label(format!("•  {b}"));
+                        } else {
+                            ui.label(t);
+                        }
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if can_update && ui.button("Update now").clicked() {
+                        install = true;
+                    }
+                    if ui.button("Open release page").clicked() {
+                        page = true;
+                    }
+                });
+            });
+        if page && r.page.starts_with("https://") {
+            let _ = open::that(&r.page);
+        }
+        if install {
+            self.show_notes = false;
+            self.start_self_install(ctx, true);
+        } else if !open {
+            self.show_notes = false;
+        }
+    }
+
     fn say(&mut self, s: impl Into<String>) {
         self.toast = Some((s.into(), Instant::now()));
     }
@@ -494,6 +699,54 @@ impl Manager {
     fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
+                Msg::SelfChecked { res, manual } => {
+                    self.upd_checking = false;
+                    match res {
+                        Ok(Some(r)) => {
+                            if manual || self.cfg.skipped_version != r.version {
+                                let auto = self.cfg.update_auto && !manual && r.can_install();
+                                if manual {
+                                    self.say(format!("Version {} is available", r.version));
+                                }
+                                self.upd_dismissed = false;
+                                self.upd = Some(r);
+                                if auto {
+                                    self.start_self_install(ctx, false);
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            self.upd = None;
+                            if manual {
+                                self.say("Portable App Manager is up to date");
+                            }
+                        }
+                        Err(e) => {
+                            if manual {
+                                self.say(format!("Update check failed: {e}"));
+                            }
+                        }
+                    }
+                }
+                Msg::SelfProgress { frac } => {
+                    if self.upd_progress.is_some() {
+                        self.upd_progress = Some(frac);
+                    }
+                }
+                Msg::SelfInstalled { res, restart } => {
+                    self.upd_progress = None;
+                    match res {
+                        Ok(exe) => {
+                            if restart {
+                                self.restart_exe = Some(exe);
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            } else {
+                                self.upd_ready = Some(exe);
+                            }
+                        }
+                        Err(e) => self.say(format!("Update failed: {e}")),
+                    }
+                }
                 Msg::Progress { id, text, frac } => {
                     if let Some(b) = self.busy.get_mut(&id) {
                         *b = (text, frac);
@@ -1611,6 +1864,7 @@ impl Manager {
         let mut open = true;
         let mut changed = false;
         let (mut change_loc, mut reset_loc) = (false, false);
+        let mut check_self = false;
         let mut style_changed = false;
         egui::Window::new("Settings")
             .open(&mut open)
@@ -1621,6 +1875,36 @@ impl Manager {
             ui.label("GitHub token (optional – raises the API rate limit):");
             changed |= ui.add(egui::TextEdit::singleline(&mut self.cfg.github_token).password(true).desired_width(300.0)).changed();
             changed |= ui.checkbox(&mut self.cfg.auto_check, "Check for updates on startup").changed();
+            ui.separator();
+            ui.strong("Portable App Manager updates");
+            ui.label(RichText::new(format!("You have version {}", selfupdate::current_version())).small().weak());
+            ui.horizontal(|ui| {
+                ui.label("Update source");
+                changed |= ui
+                    .add(egui::TextEdit::singleline(&mut self.cfg.update_repo).hint_text("owner/repo (a public GitHub repo)").desired_width(280.0))
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Release file");
+                changed |= ui
+                    .add(egui::TextEdit::singleline(&mut self.cfg.update_asset).hint_text("empty = best match for this system, * allowed").desired_width(280.0))
+                    .changed();
+            });
+            changed |= ui.checkbox(&mut self.cfg.update_check, "Look for a new version on startup").changed();
+            changed |= ui.checkbox(&mut self.cfg.update_auto, "Download and install new versions automatically (restart to finish)").changed();
+            changed |= ui.checkbox(&mut self.cfg.update_prerelease, "Include pre-releases").changed();
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!self.upd_checking, egui::Button::new("Check now")).clicked() {
+                    check_self = true;
+                }
+                if self.upd_checking {
+                    ui.spinner();
+                }
+                if !self.cfg.skipped_version.is_empty() && ui.small_button(format!("Skipped {} - clear", self.cfg.skipped_version)).clicked() {
+                    self.cfg.skipped_version.clear();
+                    changed = true;
+                }
+            });
             ui.separator();
             ui.strong("Appearance");
             ui.horizontal(|ui| {
@@ -1704,6 +1988,9 @@ impl Manager {
             self.save();
         }
         self.show_settings = open;
+        if check_self {
+            self.start_self_check(ctx, true);
+        }
         if change_loc {
             if let Some(base) = rfd::FileDialog::new().set_title("Choose the folder that will contain pam-data").pick_folder() {
                 self.begin_move(Some(base));
@@ -1813,6 +2100,9 @@ impl eframe::App for Manager {
             self.cfg.window_maximized = self.win_maxi;
             self.save();
         }
+        if let Some(exe) = self.restart_exe.take() {
+            selfupdate::restart(&exe);
+        }
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.style_dirty {
@@ -1881,6 +2171,7 @@ impl eframe::App for Manager {
         if view_changed {
             self.save();
         }
+        self.update_banner(ctx);
         let mut acts: Vec<(String, Act)> = Vec::new();
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.cfg.apps.is_empty() {
@@ -1962,6 +2253,7 @@ impl eframe::App for Manager {
         self.form_window(ctx);
         self.remove_window(ctx);
         self.settings_window(ctx);
+        self.notes_window(ctx);
         self.import_window(ctx);
         self.move_window(ctx);
     }

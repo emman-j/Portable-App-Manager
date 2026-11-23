@@ -1,12 +1,8 @@
-//! Persistent data model + on-disk layout (everything lives next to the exe => portable).
-
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type")]
 pub enum Source {
-    /// GitHub release. `pattern` = package name WITHOUT version (supports `*`).
     GitHub {
         repo: String,
         #[serde(default)]
@@ -14,9 +10,7 @@ pub enum Source {
         #[serde(default)]
         prerelease: bool,
     },
-    /// A plain download link.
     Direct { url: String },
-    /// A custom download page: we scrape links from the HTML.
     Site {
         page_url: String,
         #[serde(default)]
@@ -26,10 +20,8 @@ pub enum Source {
         #[serde(default)]
         version_regex: String,
     },
-    /// You download / pick it yourself.
     Manual,
 }
-
 impl Source {
     pub fn label(&self) -> &'static str {
         match self {
@@ -52,11 +44,13 @@ impl Source {
         }
     }
 }
+fn default_update_repo() -> String {
+    crate::selfupdate::DEFAULT_REPO.to_string()
+}
 
 fn yes() -> bool {
     true
 }
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppEntry {
     pub id: String,
@@ -79,7 +73,6 @@ pub struct AppEntry {
     #[serde(default)]
     pub custom_icon: bool,
 }
-
 impl AppEntry {
     /// A program that is only linked (not copied into the data folder).
     pub fn is_link(&self) -> bool {
@@ -103,7 +96,6 @@ impl AppEntry {
         paths.icons().join(format!("{}.png", crate::util::slug(&self.id)))
     }
     pub fn dir(&self, paths: &Paths) -> PathBuf {
-        // slug() makes sure an id can never point outside the apps folder (no "..", no absolute paths)
         paths.apps().join(crate::util::slug(&self.id))
     }
     pub fn exe_path(&self, paths: &Paths) -> Option<PathBuf> {
@@ -112,15 +104,12 @@ impl AppEntry {
         Some(if p.is_absolute() { p.to_path_buf() } else { self.dir(paths).join(p) })
     }
 }
-
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
 pub enum ViewMode {
     #[default]
     List,
     Tiles,
 }
-
-/// Colour theme: follow the OS, or force dark / light.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
 pub enum Theme {
     #[default]
@@ -128,23 +117,18 @@ pub enum Theme {
     Dark,
     Light,
 }
-
 fn default_scale() -> f32 {
     1.0
 }
-
 fn default_tile() -> f32 {
     128.0
 }
-
 fn default_group_tile() -> f32 {
     110.0
 }
-
 fn default_per_row() -> u32 {
     3
 }
-
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -155,19 +139,14 @@ pub struct Config {
     pub auto_check: bool,
     #[serde(default)]
     pub view: ViewMode,
-    /// current tile (icon) size - saved on exit when `remember_window` is on
     #[serde(default = "default_tile")]
     pub tile_size: f32,
-    /// size used when "remember" is off, or when you press "use default now"
     #[serde(default = "default_tile")]
     pub default_tile_size: f32,
-    /// max icons per row in a group popup window (the window is sized to fit it)
     #[serde(default = "default_per_row", alias = "tile_columns")]
     pub max_per_row: u32,
-    /// icon size inside the group popup window (independent of the main window's icon size)
     #[serde(default = "default_group_tile")]
     pub group_tile_size: f32,
-    /// save window size + icon size when closing, restore them on start
     #[serde(default = "yes")]
     pub remember_window: bool,
     #[serde(default)]
@@ -176,11 +155,26 @@ pub struct Config {
     pub window_maximized: bool,
     #[serde(default)]
     pub theme: Theme,
-    /// text size multiplier (1.0 = normal)
     #[serde(default = "default_scale")]
     pub font_scale: f32,
+    /// GitHub repo (owner/repo) that Portable App Manager itself is updated from
+    #[serde(default = "default_update_repo")]
+    pub update_repo: String,
+    /// release file name / pattern to install (empty = best match for this system)
+    #[serde(default)]
+    pub update_asset: String,
+    /// look for a new version on startup
+    #[serde(default = "yes")]
+    pub update_check: bool,
+    /// download + install a new version without asking (restart to finish)
+    #[serde(default)]
+    pub update_auto: bool,
+    #[serde(default)]
+    pub update_prerelease: bool,
+    /// a version the user chose to skip
+    #[serde(default)]
+    pub skipped_version: String,
 }
-
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -197,40 +191,37 @@ impl Default for Config {
             window_maximized: false,
             theme: Theme::System,
             font_scale: 1.0,
+            update_repo: default_update_repo(),
+            update_asset: String::new(),
+            update_check: true,
+            update_auto: false,
+            update_prerelease: false,
+            skipped_version: String::new(),
         }
     }
 }
-
 #[derive(Clone)]
 pub struct Paths {
     pub root: PathBuf,
 }
-
 impl Paths {
-    /// PAM_DATA environment variable = exact data folder (overrides everything).
     pub fn env_override() -> Option<PathBuf> {
         std::env::var_os("PAM_DATA").map(PathBuf::from)
     }
-
     pub fn exe_dir() -> PathBuf {
         std::env::current_exe()
             .ok()
             .and_then(|e| e.parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."))
     }
-
-    /// Small pointer file next to the exe that remembers the chosen location.
     pub fn pointer_file() -> PathBuf {
         Self::exe_dir().join("pam-location.txt")
     }
-
     pub fn read_pointer() -> Option<PathBuf> {
         let s = std::fs::read_to_string(Self::pointer_file()).ok()?;
         let p = PathBuf::from(s.trim());
         (!p.as_os_str().is_empty()).then_some(p)
     }
-
-    /// `Some(folder)` = use that folder as the base, `None` = back to the app folder.
     pub fn write_pointer(base: Option<&Path>) -> Result<(), String> {
         match base {
             Some(b) => std::fs::write(Self::pointer_file(), b.to_string_lossy().as_bytes()).map_err(|e| e.to_string()),
@@ -241,18 +232,13 @@ impl Paths {
             },
         }
     }
-
-    /// The data folder that lives inside a chosen base folder.
     pub fn root_for(base: &Path) -> PathBuf {
         base.join("pam-data")
     }
-
     pub fn at(root: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&root);
         Paths { root }
     }
-
-    /// Order: PAM_DATA  >  folder chosen in Settings (pam-location.txt)  >  next to the exe.
     pub fn detect() -> Self {
         if let Some(p) = Self::env_override() {
             return Self::at(p);
@@ -265,7 +251,6 @@ impl Paths {
         }
         Self::at(Self::root_for(&Self::exe_dir()))
     }
-
     pub fn config(&self) -> PathBuf {
         self.root.join("config.json")
     }
@@ -279,14 +264,12 @@ impl Paths {
         self.root.join("tmp")
     }
 }
-
 impl Config {
     pub fn load(paths: &Paths) -> Self {
         let mut cfg = match std::fs::read_to_string(paths.config()) {
             Ok(text) => match serde_json::from_str::<Config>(&text) {
                 Ok(c) => c,
                 Err(_) => {
-                    // keep the unreadable file instead of silently overwriting it on the next save
                     let _ = std::fs::write(paths.root.join("config.json.bad"), &text);
                     Config::default()
                 }
@@ -294,7 +277,7 @@ impl Config {
             Err(_) => Config::default(),
         };
         for a in cfg.apps.iter_mut() {
-            a.group = crate::util::norm_group(&a.group); // groups are one level only
+            a.group = crate::util::norm_group(&a.group);
         }
         cfg
     }

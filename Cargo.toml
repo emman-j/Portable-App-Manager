@@ -1,6 +1,6 @@
 [package]
 name = "portable-app-manager"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 build = "build.rs"
 
@@ -20,6 +20,7 @@ rfd = "0.15"
 open = "5"
 pelite = "0.10"
 image = { version = "0.25", default-features = false, features = ["ico", "png", "bmp", "jpeg"] }
+sha2 = "0.10"
 
 [profile.release]
 lto = true
